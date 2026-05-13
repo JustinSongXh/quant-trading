@@ -1,7 +1,7 @@
-"""模拟券商：处理 A 股交易规则"""
+"""模拟券商：处理 A 股 / 港股交易规则"""
 
 from dataclasses import dataclass, field
-from config.settings import BACKTEST, LIMIT_RULES
+from config.settings import BACKTEST, BACKTEST_HK, LIMIT_RULES
 
 
 @dataclass
@@ -14,40 +14,56 @@ class Position:
 
 @dataclass
 class Broker:
-    """模拟券商，处理 T+1、涨跌停、手续费"""
+    """模拟券商，处理 A股T+1 / 港股T+0、涨跌停、手续费"""
 
     cash: float = BACKTEST["initial_capital"]
     positions: dict[str, Position] = field(default_factory=dict)
     trade_log: list[dict] = field(default_factory=list)
 
-    def can_sell(self, symbol: str, current_date: str) -> bool:
-        """T+1 检查：今天买的不能今天卖"""
+    def _get_config(self, board: str) -> dict:
+        """根据板块获取对应的交易参数"""
+        if board == "hk":
+            return BACKTEST_HK
+        return BACKTEST
+
+    def can_sell(self, symbol: str, current_date: str, board: str = "main_board") -> bool:
+        """T+N 检查：A股T+1今天买的不能卖，港股T+0可以"""
         pos = self.positions.get(symbol)
         if not pos or pos.shares <= 0:
             return False
+        if board == "hk":
+            return True  # 港股 T+0
         return pos.buy_date < current_date
 
     def is_limit_up(self, prev_close: float, current_price: float, board: str) -> bool:
-        """是否涨停"""
+        """是否涨停（港股无涨跌停）"""
+        if board == "hk":
+            return False
         limit = LIMIT_RULES.get(board, 0.10)
         return current_price >= prev_close * (1 + limit) * 0.999
 
     def is_limit_down(self, prev_close: float, current_price: float, board: str) -> bool:
-        """是否跌停"""
+        """是否跌停（港股无涨跌停）"""
+        if board == "hk":
+            return False
         limit = LIMIT_RULES.get(board, 0.10)
         return current_price <= prev_close * (1 - limit) * 1.001
 
-    def buy(self, symbol: str, price: float, shares: int, date: str):
+    def buy(self, symbol: str, price: float, shares: int, date: str, board: str = "main_board"):
         """买入"""
-        # A 股最小单位 100 股
-        shares = (shares // 100) * 100
+        cfg = self._get_config(board)
+        lot_size = cfg.get("lot_size", 100)
+
+        shares = (shares // lot_size) * lot_size
         if shares <= 0:
             return
 
         cost = price * shares
-        commission = max(cost * BACKTEST["commission_rate"], 5)  # 最低 5 元
-        slippage_cost = cost * BACKTEST["slippage"]
-        total_cost = cost + commission + slippage_cost
+        commission = max(cost * cfg["commission_rate"], cfg.get("min_commission", 5))
+        # 港股印花税买卖双边
+        stamp_tax = cost * cfg["stamp_tax_rate"] if board == "hk" else 0
+        slippage_cost = cost * cfg["slippage"]
+        total_cost = cost + commission + stamp_tax + slippage_cost
 
         if total_cost > self.cash:
             return
@@ -65,17 +81,18 @@ class Broker:
 
         self.trade_log.append({"date": date, "symbol": symbol, "action": "BUY", "price": price, "shares": shares, "cost": total_cost})
 
-    def sell(self, symbol: str, price: float, shares: int, date: str):
+    def sell(self, symbol: str, price: float, shares: int, date: str, board: str = "main_board"):
         """卖出"""
         pos = self.positions.get(symbol)
         if not pos or pos.shares <= 0:
             return
 
+        cfg = self._get_config(board)
         shares = min(shares, pos.shares)
         revenue = price * shares
-        commission = max(revenue * BACKTEST["commission_rate"], 5)
-        stamp_tax = revenue * BACKTEST["stamp_tax_rate"]  # 印花税卖出单边
-        slippage_cost = revenue * BACKTEST["slippage"]
+        commission = max(revenue * cfg["commission_rate"], cfg.get("min_commission", 5))
+        stamp_tax = revenue * cfg["stamp_tax_rate"]  # A股卖出单边 / 港股双边
+        slippage_cost = revenue * cfg["slippage"]
         net_revenue = revenue - commission - stamp_tax - slippage_cost
 
         self.cash += net_revenue

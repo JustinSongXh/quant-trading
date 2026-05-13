@@ -1,6 +1,7 @@
-"""行情与财务数据采集（AKShare 优先，baostock 备选）"""
+"""行情数据采集（A股: AKShare/baostock, 港股: 腾讯财经）"""
 
 import pandas as pd
+import requests
 from config.settings import DEFAULT_LOOKBACK_DAYS
 from datetime import datetime, timedelta
 from utils.logger import get_logger
@@ -8,8 +9,14 @@ from utils.logger import get_logger
 logger = get_logger("fetcher")
 
 
+def is_hk_stock(symbol: str) -> bool:
+    """判断是否为港股代码（5位数字）"""
+    return len(symbol) == 5 and symbol.isdigit()
+
+
+# ========== A 股数据采集 ==========
+
 def _symbol_to_baostock(symbol: str) -> str:
-    """将纯数字代码转为 baostock 格式：sh.600519 / sz.000858"""
     if symbol.startswith(("6", "9")):
         return f"sh.{symbol}"
     return f"sz.{symbol}"
@@ -21,7 +28,6 @@ def _fetch_via_akshare(symbol: str, start: str, end: str) -> pd.DataFrame:
         symbol=symbol, period="daily",
         start_date=start, end_date=end, adjust="qfq",
     )
-    # 不硬编码列名，用 AKShare 返回的原始列名做映射
     col_map = {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high",
                "最低": "low", "成交量": "volume", "成交额": "turnover",
                "振幅": "amplitude", "涨跌幅": "pct_change", "涨跌额": "change",
@@ -29,7 +35,6 @@ def _fetch_via_akshare(symbol: str, start: str, end: str) -> pd.DataFrame:
     df = df.rename(columns=col_map)
     df["date"] = pd.to_datetime(df["date"])
     df = df.set_index("date").sort_index()
-    # 只保留核心列
     core_cols = ["open", "close", "high", "low", "volume"]
     return df[[c for c in core_cols if c in df.columns]]
 
@@ -44,7 +49,7 @@ def _fetch_via_baostock(symbol: str, start: str, end: str) -> pd.DataFrame:
         bs_symbol,
         "date,open,high,low,close,volume",
         start_date=start_fmt, end_date=end_fmt,
-        frequency="d", adjustflag="2",  # 前复权
+        frequency="d", adjustflag="2",
     )
     rows = []
     while (rs.error_code == "0") and rs.next():
@@ -59,11 +64,8 @@ def _fetch_via_baostock(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
-    """获取个股日K线数据（前复权），AKShare 优先，失败则用 baostock"""
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-
+def _fetch_a_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """A 股：AKShare 优先，baostock 备选"""
     try:
         df = _fetch_via_akshare(symbol, start, end)
         if not df.empty:
@@ -77,8 +79,63 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.Data
     return df
 
 
+# ========== 港股数据采集 ==========
+
+def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """港股：通过腾讯财经接口获取日K线（前复权）"""
+    start_fmt = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+    end_fmt = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+
+    url = "https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get"
+    params = {"param": f"hk{symbol},day,{start_fmt},{end_fmt},500,qfq"}
+
+    resp = requests.get(url, params=params, timeout=15)
+    data = resp.json()
+
+    hk_key = f"hk{symbol}"
+    hk_data = data.get("data", {}).get(hk_key, {})
+    # 优先取前复权数据，没有则取普通日线
+    klines = hk_data.get("qfqday") or hk_data.get("day") or []
+    if not klines:
+        raise ValueError(f"No HK data returned for {symbol}")
+
+    # 腾讯格式: [date, open, close, high, low, volume, ...]
+    rows = []
+    for k in klines:
+        rows.append({
+            "date": k[0],
+            "open": float(k[1]),
+            "close": float(k[2]),
+            "high": float(k[3]),
+            "low": float(k[4]),
+            "volume": float(k[5]),
+        })
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    logger.info(f"  {symbol}: fetched {len(df)} rows via Tencent HK")
+    return df
+
+
+# ========== 统一入口 ==========
+
+def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
+    """获取个股日K线数据（前复权），自动识别 A 股/港股"""
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+    if is_hk_stock(symbol):
+        return _fetch_hk_stock(symbol, start, end)
+    else:
+        return _fetch_a_stock(symbol, start, end)
+
+
 def fetch_stock_info(symbol: str) -> dict:
-    """获取个股基本信息（名称、行业、板块类型等）"""
+    """获取个股基本信息（板块类型）"""
+    if is_hk_stock(symbol):
+        return {"symbol": symbol, "board": "hk", "market": "HK"}
+
     prefix = symbol[:3]
     if prefix in ("600", "601", "603", "605"):
         board = "main_board"
@@ -90,4 +147,4 @@ def fetch_stock_info(symbol: str) -> dict:
         board = "main_board"
     else:
         board = "main_board"
-    return {"symbol": symbol, "board": board}
+    return {"symbol": symbol, "board": board, "market": "A"}

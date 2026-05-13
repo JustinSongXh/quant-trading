@@ -1,12 +1,17 @@
 [
-    {"code": "600519", "name": "贵州茅台"},
-    {"code": "000858", "name": "五粮液"},
-    {"code": "300750", "name": "宁德时代"},
-    {"code": "601318", "name": "中国平安"},
-    {"code": "000001", "name": "平安银行"},
-    {"code": "600036", "name": "招商银行"},
-    {"code": "000333", "name": "美的集团"},
-    {"code": "002594", "name": "比亚迪"},
-    {"code": "600900", "name": "长江电力"},
-    {"code": "688981", "name": "中芯国际"}
+    {"code": "600519", "name": "贵州茅台", "market": "A"},
+    {"code": "000858", "name": "五粮液", "market": "A"},
+    {"code": "300750", "name": "宁德时代", "market": "A"},
+    {"code": "601318", "name": "中国平安", "market": "A"},
+    {"code": "000001", "name": "平安银行", "market": "A"},
+    {"code": "600036", "name": "招商银行", "market": "A"},
+    {"code": "000333", "name": "美的集团", "market": "A"},
+    {"code": "002594", "name": "比亚迪", "market": "A"},
+    {"code": "600900", "name": "长江电力", "market": "A"},
+    {"code": "688981", "name": "中芯国际", "market": "A"},
+    {"code": "00700", "name": "腾讯控股", "market": "HK"},
+    {"code": "09988", "name": "阿里巴巴", "market": "HK"},
+    {"code": "03690", "name": "美团", "market": "HK"},
+    {"code": "01810", "name": "小米集团", "market": "HK"},
+    {"code": "09888", "name": "百度集团", "market": "HK"}
 ]

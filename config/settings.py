@@ -53,6 +53,17 @@ BACKTEST = {
     "max_position_pct": 0.3,          # 单只股票最大仓位 30%
 }
 
+# ========== 港股回测参数 ==========
+BACKTEST_HK = {
+    "initial_capital": 100_000,
+    "commission_rate": 0.0005,          # 佣金费率 万5
+    "min_commission": 50,               # 最低佣金 50 港元
+    "stamp_tax_rate": 0.0013,           # 印花税 千1.3（买卖双边）
+    "slippage": 0.002,
+    "max_position_pct": 0.3,
+    "lot_size": 100,                    # 默认每手100股（实际每只不同）
+}
+
 # ========== 涨跌停规则 ==========
 LIMIT_RULES = {
     "main_board": 0.10,    # 主板 ±10%
