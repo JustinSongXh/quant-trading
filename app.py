@@ -5,8 +5,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
-from config.settings import load_stock_pool, get_stock_name
+from config.settings import load_stock_pool, get_stock_name, add_stock, remove_stock
 from data.fetcher import fetch_daily_kline, is_hk_stock
+from data.stock_list import search_stocks, get_all_stocks
 from data.mock import fetch_mock_kline
 from data.cache import save_kline, load_kline
 from strategy.signals import build_signals
@@ -385,14 +386,109 @@ def page_detail():
             st.info("回测期间无交易发生")
 
 
+# ========== 股票池管理页 ==========
+
+def page_manage():
+    st.title("A股港股量化分析系统")
+    st.subheader("股票池管理")
+
+    pool = load_stock_pool()
+    pool_codes = {s["code"] for s in pool}
+
+    col_left, col_right = st.columns([1, 1], gap="large")
+
+    # ========== 左侧：当前股票池列表 ==========
+    with col_left:
+        st.markdown("### 当前股票池")
+
+        a_pool = [s for s in pool if s.get("market", "A") == "A"]
+        hk_pool = [s for s in pool if s.get("market") == "HK"]
+
+        for label, sub_pool in [("A股", a_pool), ("港股", hk_pool)]:
+            if not sub_pool:
+                continue
+            st.markdown(f"**{label}**（{len(sub_pool)} 只）")
+            for s in sub_pool:
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"{s['name']}（{s['code']}）")
+                if c2.button("移除", key=f"del_{s['code']}"):
+                    remove_stock(s["code"])
+                    st.rerun()
+
+        # 手动输入添加
+        st.markdown("---")
+        st.markdown("**手动添加**")
+        add_cols = st.columns([2, 2, 1, 1])
+        new_code = add_cols[0].text_input("代码", placeholder="600519 或 00700", key="manual_code")
+        new_name = add_cols[1].text_input("名称", placeholder="贵州茅台", key="manual_name")
+        new_market = add_cols[2].selectbox("市场", ["A", "HK"], key="manual_market")
+        add_cols[3].write("")  # 占位对齐
+        if add_cols[3].button("添加", key="manual_add"):
+            if new_code and new_name:
+                if add_stock(new_code.strip(), new_name.strip(), new_market):
+                    st.rerun()
+                else:
+                    st.warning(f"{new_code} 已在股票池中")
+            else:
+                st.warning("请填写代码和名称")
+
+    # ========== 右侧：搜索全市场股票 ==========
+    with col_right:
+        st.markdown("### 搜索全市场股票")
+
+        search_cols = st.columns([3, 1])
+        keyword = search_cols[0].text_input("输入代码或名称", placeholder="如: 茅台、00700、银行", key="search_kw")
+        market_filter = search_cols[1].selectbox("市场", ["全部", "A股", "港股"], key="search_market")
+
+        if keyword:
+            m = None
+            if market_filter == "A股":
+                m = "A"
+            elif market_filter == "港股":
+                m = "HK"
+
+            results = search_stocks(keyword, market=m)
+
+            if not results:
+                st.info(f"未找到「{keyword}」相关股票。如果是首次使用，列表需加载约 10 秒。")
+            else:
+                st.markdown(f"找到 **{len(results)}** 只（最多 50 条）")
+
+                # 表头
+                h1, h2, h3, h4 = st.columns([2, 2, 1, 1])
+                h1.markdown("**代码**")
+                h2.markdown("**名称**")
+                h3.markdown("**市场**")
+                h4.markdown("**操作**")
+
+                for s in results:
+                    market_tag = "港股" if s.get("market") == "HK" else "A股"
+                    in_pool = s["code"] in pool_codes
+                    c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+                    c1.write(s["code"])
+                    c2.write(s["name"])
+                    c3.write(market_tag)
+                    if in_pool:
+                        c4.markdown('<span style="color:#27ae60">✓ 已添加</span>', unsafe_allow_html=True)
+                    else:
+                        if c4.button("添加", key=f"add_{s['code']}"):
+                            add_stock(s["code"], s["name"], s.get("market", "A"))
+                            st.rerun()
+        else:
+            st.info("输入关键词搜索 A 股（约 5200 只）或港股（30 只热门），回车确认。")
+
+
 # ========== 页面路由 ==========
 
+pages = ["全局信号总览", "单股票分析", "股票池管理"]
 default_page = st.session_state.get("page", "全局信号总览")
-default_idx = 0 if default_page == "全局信号总览" else 1
-page = st.sidebar.radio("页面", ["全局信号总览", "单股票分析"], index=default_idx)
+default_idx = pages.index(default_page) if default_page in pages else 0
+page = st.sidebar.radio("页面", pages, index=default_idx)
 st.session_state["page"] = page
 
 if page == "全局信号总览":
     page_overview()
-else:
+elif page == "单股票分析":
     page_detail()
+else:
+    page_manage()

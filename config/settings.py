@@ -28,6 +28,29 @@ def get_stock_name(code: str) -> str:
             return s["name"]
     return code
 
+
+def save_stock_pool(stocks: list[dict]):
+    """保存股票池到 stocks.json"""
+    with open(_STOCKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(stocks, f, ensure_ascii=False, indent=4)
+
+
+def add_stock(code: str, name: str, market: str = "A"):
+    """添加股票到股票池"""
+    pool = load_stock_pool()
+    if any(s["code"] == code for s in pool):
+        return False  # 已存在
+    pool.append({"code": code, "name": name, "market": market})
+    save_stock_pool(pool)
+    return True
+
+
+def remove_stock(code: str):
+    """从股票池删除股票"""
+    pool = load_stock_pool()
+    pool = [s for s in pool if s["code"] != code]
+    save_stock_pool(pool)
+
 # ========== 数据配置 ==========
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 CACHE_DB_PATH = os.path.join(DATA_DIR, "cache", "market.duckdb")
