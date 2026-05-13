@@ -16,8 +16,8 @@ from backtest.metrics import calc_metrics
 from analysis.chanlun import analyze as chanlun_analyze
 
 
-st.set_page_config(page_title="A股量化回测系统", layout="wide")
-st.title("A股量化回测系统")
+st.set_page_config(page_title="A股港股量化分析系统", layout="wide")
+st.title("A股港股量化分析系统")
 
 # ========== 侧边栏 ==========
 stocks = load_stock_pool()
@@ -26,17 +26,25 @@ selected = st.sidebar.selectbox("选择股票", list(stock_options.keys()))
 symbol = stock_options[selected]
 name = get_stock_name(symbol)
 
-if st.sidebar.button("开始回测", type="primary"):
+# 时间范围选择
+time_range = st.sidebar.selectbox("回测时间范围", ["近3个月", "近6个月", "近1年", "近2年"], index=2)
+time_range_days = {"近3个月": 90, "近6个月": 180, "近1年": 365, "近2年": 730}[time_range]
+
+if st.sidebar.button("开始分析", type="primary"):
     with st.spinner(f"正在分析 {name}({symbol})..."):
-        # 获取数据
-        df = load_kline(symbol)
-        if df is None:
-            try:
-                df = fetch_daily_kline(symbol)
-                save_kline(symbol, df)
-            except Exception:
+        # 获取数据（始终拉最大范围，然后按选择截取）
+        try:
+            df = fetch_daily_kline(symbol, days=max(time_range_days + 60, 400))
+            save_kline(symbol, df)
+        except Exception:
+            df = load_kline(symbol)
+            if df is None:
                 df = fetch_mock_kline(symbol)
                 st.warning("无法连接数据源，使用模拟数据")
+
+        # 按时间范围截取
+        cutoff = df.index.max() - pd.Timedelta(days=time_range_days)
+        df = df.loc[df.index >= cutoff]
 
         # 构建信号 & 回测
         signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
