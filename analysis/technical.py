@@ -52,6 +52,12 @@ def bollinger_bands(close: pd.Series, period: int, std_dev: float = 2.0) -> pd.D
     return pd.DataFrame({"boll_upper": upper, "boll_mid": mid, "boll_lower": lower}, index=close.index)
 
 
+def volume_ratio(volume: pd.Series, period: int = 5) -> pd.Series:
+    """量比：当日成交量 / 过去N日平均成交量"""
+    avg_vol = volume.rolling(window=period).mean().shift(1)
+    return volume / avg_vol
+
+
 # ========== 主函数 ==========
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -75,36 +81,158 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 布林带
     result = pd.concat([result, bollinger_bands(result["close"], TECHNICAL["boll_period"])], axis=1)
 
+    # 量比
+    result["vol_ratio"] = volume_ratio(result["volume"])
+
     return result
 
 
+# ========== 分维度信号函数 ==========
+
+def _signal_macd(df: pd.DataFrame) -> pd.Series:
+    """MACD 信号：金叉买入、死叉卖出"""
+    sig = pd.Series(0.0, index=df.index)
+    dif, dea = df["macd_dif"], df["macd_dea"]
+    # 金叉：DIF 上穿 DEA
+    golden = (dif > dea) & (dif.shift(1) <= dea.shift(1))
+    # 死叉：DIF 下穿 DEA
+    death = (dif < dea) & (dif.shift(1) >= dea.shift(1))
+    sig.loc[golden] = 1.0
+    sig.loc[death] = -1.0
+    return sig
+
+
+def _signal_rsi(df: pd.DataFrame) -> pd.Series:
+    """RSI 信号：超卖区回升买入，超买区回落卖出"""
+    sig = pd.Series(0.0, index=df.index)
+    r = df["rsi"]
+    # 从超卖区回升（上穿30）
+    buy = (r > 30) & (r.shift(1) <= 30)
+    # 从超买区回落（下穿70）
+    sell = (r < 70) & (r.shift(1) >= 70)
+    sig.loc[buy] = 1.0
+    sig.loc[sell] = -1.0
+    return sig
+
+
+def _signal_kdj(df: pd.DataFrame) -> pd.Series:
+    """KDJ 信号：K上穿D金叉买入，K下穿D死叉卖出，J值极端区域加强"""
+    sig = pd.Series(0.0, index=df.index)
+    k, d, j = df["kdj_k"], df["kdj_d"], df["kdj_j"]
+    # K 上穿 D
+    golden = (k > d) & (k.shift(1) <= d.shift(1))
+    # K 下穿 D
+    death = (k < d) & (k.shift(1) >= d.shift(1))
+    sig.loc[golden] = 1.0
+    sig.loc[death] = -1.0
+    # J < 0 超卖加强买入，J > 100 超买加强卖出
+    sig.loc[golden & (j < 20)] = 1.5
+    sig.loc[death & (j > 80)] = -1.5
+    return sig
+
+
+def _signal_ma_cross(df: pd.DataFrame) -> pd.Series:
+    """均线交叉信号：短期均线穿越长期均线"""
+    sig = pd.Series(0.0, index=df.index)
+    if "ma_5" not in df.columns or "ma_20" not in df.columns:
+        return sig
+    ma5, ma20 = df["ma_5"], df["ma_20"]
+    golden = (ma5 > ma20) & (ma5.shift(1) <= ma20.shift(1))
+    death = (ma5 < ma20) & (ma5.shift(1) >= ma20.shift(1))
+    sig.loc[golden] = 1.0
+    sig.loc[death] = -1.0
+    return sig
+
+
+def _signal_ma_trend(df: pd.DataFrame) -> pd.Series:
+    """均线多头/空头排列信号"""
+    sig = pd.Series(0.0, index=df.index)
+    cols = [f"ma_{p}" for p in TECHNICAL["ma_periods"] if f"ma_{p}" in df.columns]
+    if len(cols) < 3:
+        return sig
+    # 多头排列：短期 > 中期 > 长期
+    bull = True
+    bear = True
+    for i in range(len(cols) - 1):
+        bull = bull & (df[cols[i]] > df[cols[i + 1]])
+        bear = bear & (df[cols[i]] < df[cols[i + 1]])
+    sig.loc[bull] = 0.5
+    sig.loc[bear] = -0.5
+    return sig
+
+
+def _signal_boll(df: pd.DataFrame) -> pd.Series:
+    """布林带信号：突破上轨卖出，跌破下轨买入，回归中轨确认"""
+    sig = pd.Series(0.0, index=df.index)
+    close = df["close"]
+    upper, mid, lower = df["boll_upper"], df["boll_mid"], df["boll_lower"]
+    # 价格从下方突破下轨后回升（下轨反弹买入）
+    buy = (close > lower) & (close.shift(1) <= lower.shift(1))
+    # 价格从上方跌破上轨（上轨回落卖出）
+    sell = (close < upper) & (close.shift(1) >= upper.shift(1))
+    sig.loc[buy] = 1.0
+    sig.loc[sell] = -1.0
+    return sig
+
+
+def _signal_volume_confirm(df: pd.DataFrame) -> pd.Series:
+    """成交量确认信号：放量增强信号可信度，缩量降低可信度"""
+    if "vol_ratio" not in df.columns:
+        return pd.Series(1.0, index=df.index)
+    vr = df["vol_ratio"]
+    confirm = pd.Series(1.0, index=df.index)
+    confirm.loc[vr > 1.5] = 1.5   # 放量：信号增强50%
+    confirm.loc[vr > 2.0] = 1.8   # 大幅放量：增强80%
+    confirm.loc[vr < 0.5] = 0.5   # 缩量：信号打折50%
+    return confirm
+
+
+# ========== 信号汇总 ==========
+
+# 各维度权重
+SIGNAL_COMPONENT_WEIGHTS = {
+    "macd": 0.25,
+    "rsi": 0.10,
+    "kdj": 0.15,
+    "ma_cross": 0.15,
+    "ma_trend": 0.15,
+    "boll": 0.20,
+}
+
+
 def generate_technical_signals(df: pd.DataFrame) -> pd.Series:
-    """基于技术指标生成交易信号
+    """基于多维度技术指标生成交易信号
 
-    返回 Series: 1=买入, -1=卖出, 0=持有
+    策略逻辑：
+    1. 6个维度独立打分（MACD/RSI/KDJ/均线交叉/均线排列/布林带）
+    2. 加权求和得到原始分数
+    3. 成交量确认：放量增强信号，缩量削弱信号
+    4. 归一化到 -1 ~ 1
+
+    Returns:
+        Series: -1（强烈卖出）~ +1（强烈买入）
     """
-    signals = pd.Series(0, index=df.index)
+    components = {
+        "macd": _signal_macd(df),
+        "rsi": _signal_rsi(df),
+        "kdj": _signal_kdj(df),
+        "ma_cross": _signal_ma_cross(df),
+        "ma_trend": _signal_ma_trend(df),
+        "boll": _signal_boll(df),
+    }
 
-    # MACD 金叉/死叉
-    if "macd_hist" in df.columns:
-        macd_hist = df["macd_hist"]
-        signals += (macd_hist > 0).astype(int) - (macd_hist < 0).astype(int)
+    # 加权求和
+    raw = pd.Series(0.0, index=df.index)
+    for name, sig in components.items():
+        raw += sig * SIGNAL_COMPONENT_WEIGHTS[name]
 
-    # RSI 超买超卖
-    if "rsi" in df.columns:
-        signals.loc[df["rsi"] < 30] += 1
-        signals.loc[df["rsi"] > 70] -= 1
-
-    # MA5 上穿/下穿 MA20
-    if "ma_5" in df.columns and "ma_20" in df.columns:
-        golden_cross = (df["ma_5"] > df["ma_20"]) & (df["ma_5"].shift(1) <= df["ma_20"].shift(1))
-        death_cross = (df["ma_5"] < df["ma_20"]) & (df["ma_5"].shift(1) >= df["ma_20"].shift(1))
-        signals.loc[golden_cross] += 1
-        signals.loc[death_cross] -= 1
+    # 成交量确认
+    vol_confirm = _signal_volume_confirm(df)
+    raw = raw * vol_confirm
 
     # 归一化到 -1 ~ 1
-    max_abs = signals.abs().max()
+    max_abs = raw.abs().max()
     if max_abs > 0:
-        signals = signals / max_abs
+        raw = raw / max_abs
 
-    return signals
+    return raw
