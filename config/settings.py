@@ -1,14 +1,32 @@
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ========== 股票池 ==========
-STOCK_POOL = [
-    "600519",  # 贵州茅台
-    "000858",  # 五粮液
-    "300750",  # 宁德时代
-]
+# ========== 股票池（从 config/stocks.json 读取）==========
+_STOCKS_FILE = os.path.join(os.path.dirname(__file__), "stocks.json")
+
+def load_stock_pool() -> list[dict]:
+    """从 stocks.json 加载股票池，返回 [{"code": "600519", "name": "贵州茅台"}, ...]"""
+    if os.path.exists(_STOCKS_FILE):
+        with open(_STOCKS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return [
+        {"code": "600519", "name": "贵州茅台"},
+        {"code": "000858", "name": "五粮液"},
+        {"code": "300750", "name": "宁德时代"},
+    ]
+
+# 兼容旧代码：纯代码列表
+STOCK_POOL = [s["code"] for s in load_stock_pool()]
+
+def get_stock_name(code: str) -> str:
+    """根据代码获取股票名称"""
+    for s in load_stock_pool():
+        if s["code"] == code:
+            return s["name"]
+    return code
 
 # ========== 数据配置 ==========
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -44,9 +62,13 @@ LIMIT_RULES = {
 
 # ========== 信号融合权重 ==========
 SIGNAL_WEIGHTS = {
-    "technical": 0.6,
-    "sentiment": 0.4,
+    "technical": 0.35,
+    "chanlun": 0.35,
+    "sentiment": 0.30,
 }
+
+# ========== 通知配置 ==========
+PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 
 # ========== API 配置 ==========
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

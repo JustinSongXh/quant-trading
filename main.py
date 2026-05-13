@@ -2,6 +2,7 @@
 
 from config.settings import STOCK_POOL
 from data.fetcher import fetch_daily_kline
+from data.mock import fetch_mock_kline
 from data.cache import save_kline, load_kline
 from strategy.signals import build_signals
 from strategy.fusion import fuse_signals
@@ -19,16 +20,20 @@ def run(symbols: list[str] | None = None):
     for symbol in symbols:
         logger.info(f"Processing {symbol}...")
 
-        # 1. 获取数据（优先读缓存）
+        # 1. 获取数据（优先读缓存 → AKShare → Mock）
         df = load_kline(symbol)
         if df is None:
-            logger.info(f"  Fetching from AKShare...")
-            df = fetch_daily_kline(symbol)
-            save_kline(symbol, df)
-            logger.info(f"  Cached {len(df)} rows")
+            try:
+                logger.info(f"  Fetching from AKShare...")
+                df = fetch_daily_kline(symbol)
+                save_kline(symbol, df)
+                logger.info(f"  Cached {len(df)} rows")
+            except Exception as e:
+                logger.warning(f"  AKShare failed ({e}), using mock data")
+                df = fetch_mock_kline(symbol)
 
-        # 2. 构建信号（情绪信号暂不接入）
-        signal_df = build_signals(df, sentiment_scores=None)
+        # 2. 构建信号（技术 + 缠论，情绪暂不接入）
+        signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
 
         # 3. 融合决策
         decisions = fuse_signals(signal_df)
