@@ -104,39 +104,54 @@ def page_overview():
 
     result_df = pd.DataFrame(rows)
 
-    # 分市场显示
+    # 分市场显示，每行带「查看详情」按钮
     for market_label, market_key in [("A股", "A股"), ("港股", "港股")]:
         market_df = result_df[result_df["市场"] == market_key]
         if market_df.empty:
             continue
 
         st.markdown(f"### {market_label}")
-        display_df = market_df.drop(columns=["_code", "市场"])
 
-        def color_rec(val):
-            if val == "买入":
-                return "color: #e74c3c; font-weight: bold"
-            elif val == "卖出":
-                return "color: #27ae60; font-weight: bold"
-            return "color: #999"
+        # 表头
+        header_cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.5, 1])
+        for col, title in zip(header_cols, ["股票", "收盘价", "技术信号", "缠论信号", "推荐", "日期", ""]):
+            col.markdown(f"**{title}**")
 
-        def color_signal(val):
-            try:
-                v = float(val)
-                if v > 0.1:
-                    return "color: #e74c3c"
-                elif v < -0.1:
-                    return "color: #27ae60"
-            except (ValueError, TypeError):
-                pass
-            return ""
+        # 数据行
+        for _, row in market_df.iterrows():
+            cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.5, 1])
+            cols[0].write(row["股票"])
+            cols[1].write(row["收盘价"])
 
-        styled = display_df.style.map(color_rec, subset=["综合推荐"])
-        styled = styled.map(color_signal, subset=["技术信号", "缠论信号"])
-        st.dataframe(styled, use_container_width=True, hide_index=True, height=min(len(market_df) * 40 + 40, 500))
+            # 技术信号带颜色
+            tech = row["技术信号"]
+            if isinstance(tech, (int, float)):
+                t_color = "#e74c3c" if tech > 0.1 else "#27ae60" if tech < -0.1 else "#666"
+                cols[2].markdown(f'<span style="color:{t_color}">{tech:.3f}</span>', unsafe_allow_html=True)
+            else:
+                cols[2].write(tech)
 
-    st.markdown("---")
-    st.info("在左侧选择「单股票分析」并选股票查看详细的 K 线图、回测和策略信号。")
+            # 缠论信号带颜色
+            chan = row["缠论信号"]
+            if isinstance(chan, (int, float)):
+                c_color = "#e74c3c" if chan > 0.1 else "#27ae60" if chan < -0.1 else "#666"
+                cols[3].markdown(f'<span style="color:{c_color}">{chan:.3f}</span>', unsafe_allow_html=True)
+            else:
+                cols[3].write(chan)
+
+            # 推荐带颜色
+            rec = row["综合推荐"]
+            r_color = "#e74c3c" if rec == "买入" else "#27ae60" if rec == "卖出" else "#999"
+            cols[4].markdown(f'<span style="color:{r_color};font-weight:bold">{rec}</span>', unsafe_allow_html=True)
+
+            cols[5].write(row["日期"])
+
+            # 查看详情按钮
+            if cols[6].button("详情", key=f"btn_{row['_code']}"):
+                st.session_state["page"] = "单股票分析"
+                st.session_state["selected_code"] = row["_code"]
+                st.session_state["auto_analyze"] = True
+                st.rerun()
 
 
 # ========== 单股票详细分析页 ==========
@@ -149,7 +164,22 @@ def page_detail():
     a_stocks = [s for s in stocks if s.get("market", "A") == "A"]
     hk_stocks = [s for s in stocks if s.get("market") == "HK"]
 
-    market_tab = st.sidebar.radio("市场", ["A股", "港股"], horizontal=True)
+    # 从 session_state 读取跳转过来的股票
+    preselected_code = st.session_state.get("selected_code", None)
+    auto_analyze = st.session_state.pop("auto_analyze", False)
+
+    # 按市场分组
+    all_options = {f"{s['name']}({s['code']})": s['code'] for s in stocks}
+    a_options = {f"{s['name']}({s['code']})": s['code'] for s in a_stocks}
+    hk_options = {f"{s['name']}({s['code']})": s['code'] for s in hk_stocks}
+
+    # 判断预选股票所在市场
+    default_market = "A股"
+    if preselected_code and is_hk_stock(preselected_code):
+        default_market = "港股"
+
+    market_tab = st.sidebar.radio("市场", ["A股", "港股"], horizontal=True,
+                                   index=0 if default_market == "A股" else 1)
     pool = a_stocks if market_tab == "A股" else hk_stocks
     stock_options = {f"{s['name']}({s['code']})": s['code'] for s in pool}
 
@@ -157,14 +187,21 @@ def page_detail():
         st.sidebar.warning(f"{market_tab}股票池为空")
         return
 
-    selected = st.sidebar.selectbox("选择股票", list(stock_options.keys()))
+    # 预选股票在当前市场中的索引
+    default_idx = 0
+    if preselected_code:
+        option_codes = list(stock_options.values())
+        if preselected_code in option_codes:
+            default_idx = option_codes.index(preselected_code)
+
+    selected = st.sidebar.selectbox("选择股票", list(stock_options.keys()), index=default_idx)
     symbol = stock_options[selected]
     name = get_stock_name(symbol)
 
     time_range = st.sidebar.selectbox("回测时间范围", ["近3个月", "近6个月", "近1年", "近2年"], index=2)
     time_range_days = {"近3个月": 90, "近6个月": 180, "近1年": 365, "近2年": 730}[time_range]
 
-    if st.sidebar.button("开始分析", type="primary"):
+    if st.sidebar.button("开始分析", type="primary") or auto_analyze:
         with st.spinner(f"正在分析 {name}({symbol})..."):
             df = get_stock_data(symbol, days=max(time_range_days + 60, 400), force_refresh=True)
 
@@ -350,7 +387,10 @@ def page_detail():
 
 # ========== 页面路由 ==========
 
-page = st.sidebar.radio("页面", ["全局信号总览", "单股票分析"], index=0)
+default_page = st.session_state.get("page", "全局信号总览")
+default_idx = 0 if default_page == "全局信号总览" else 1
+page = st.sidebar.radio("页面", ["全局信号总览", "单股票分析"], index=default_idx)
+st.session_state["page"] = page
 
 if page == "全局信号总览":
     page_overview()
