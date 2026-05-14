@@ -1,0 +1,74 @@
+<view class="container">
+  <!-- 加载中 -->
+  <view wx:if="{{loading}}" class="loading">
+    <text>正在加载信号数据...</text>
+  </view>
+
+  <!-- 错误提示 -->
+  <view wx:if="{{error}}" class="card" style="text-align:center;color:#e74c3c">
+    <text>{{error}}</text>
+  </view>
+
+  <block wx:if="{{!loading && !error}}">
+    <!-- 更新时间 -->
+    <view class="update-time">
+      <text>数据日期: {{updateTime}}</text>
+    </view>
+
+    <!-- A股 -->
+    <view wx:if="{{aStocks.length > 0}}" class="card">
+      <view class="section-title">A股 ({{aStocks.length}})</view>
+
+      <!-- 表头 -->
+      <view class="table-header">
+        <text class="col-name">股票</text>
+        <text class="col-price">价格</text>
+        <text class="col-signal">信号</text>
+        <text class="col-rec">推荐</text>
+        <text class="col-pos">仓位</text>
+      </view>
+
+      <!-- 数据行 -->
+      <view class="table-row" wx:for="{{aStocks}}" wx:key="code"
+            bindtap="goDetail" data-code="{{item.code}}">
+        <view class="col-name">
+          <text class="stock-name">{{item.name}}</text>
+          <text class="stock-code">{{item.code}}</text>
+        </view>
+        <text class="col-price">{{item.close}}</text>
+        <text class="col-signal" style="color:{{item.techColor}}">{{item.technical_signal}}</text>
+        <text class="col-rec" style="color:{{item.recColor}};font-weight:bold">{{item.recommendation}}</text>
+        <text class="col-pos" style="color:{{item.recColor}}">{{item.position}}</text>
+      </view>
+    </view>
+
+    <!-- 港股 -->
+    <view wx:if="{{hkStocks.length > 0}}" class="card">
+      <view class="section-title">港股 ({{hkStocks.length}})</view>
+
+      <view class="table-header">
+        <text class="col-name">股票</text>
+        <text class="col-price">价格</text>
+        <text class="col-signal">信号</text>
+        <text class="col-rec">推荐</text>
+        <text class="col-pos">仓位</text>
+      </view>
+
+      <view class="table-row" wx:for="{{hkStocks}}" wx:key="code"
+            bindtap="goDetail" data-code="{{item.code}}">
+        <view class="col-name">
+          <text class="stock-name">{{item.name}}</text>
+          <text class="stock-code">{{item.code}}</text>
+        </view>
+        <text class="col-price">{{item.close}}</text>
+        <text class="col-signal" style="color:{{item.techColor}}">{{item.technical_signal}}</text>
+        <text class="col-rec" style="color:{{item.recColor}};font-weight:bold">{{item.recommendation}}</text>
+        <text class="col-pos" style="color:{{item.recColor}}">{{item.position}}</text>
+      </view>
+    </view>
+
+    <view class="tip">
+      <text>点击股票查看详细分析 · 下拉刷新数据</text>
+    </view>
+  </block>
+</view>

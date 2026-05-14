@@ -1,0 +1,14 @@
+{
+    "pages": [
+        "pages/overview/overview",
+        "pages/detail/detail"
+    ],
+    "window": {
+        "navigationBarBackgroundColor": "#1a1a2e",
+        "navigationBarTitleText": "量化信号",
+        "navigationBarTextStyle": "white",
+        "backgroundColor": "#f5f5f5"
+    },
+    "style": "v2",
+    "sitemapLocation": "sitemap.json"
+}
