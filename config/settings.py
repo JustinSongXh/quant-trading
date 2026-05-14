@@ -65,6 +65,7 @@ TECHNICAL = {
     "rsi_period": 14,
     "kdj_period": 9,
     "boll_period": 20,
+    "supertrend": {"atr_period": 10, "multiplier": 3.0},
 }
 
 # ========== 回测参数 ==========

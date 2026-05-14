@@ -250,7 +250,7 @@ def page_detail():
         )
 
         # 各策略明细
-        detail_cols = st.columns(5)
+        detail_cols = st.columns(6)
 
         macd_dif = last.get("macd_dif", 0)
         macd_dea = last.get("macd_dea", 0)
@@ -274,12 +274,17 @@ def page_detail():
         boll_rec = "触及上轨 → 卖出" if last_close >= boll_upper else "触及下轨 → 买入" if last_close <= boll_lower else "中轨上方 → 偏多" if last_close > boll_mid else "中轨下方 → 偏空"
         detail_cols[3].markdown(f"**布林带**\n\n上轨: {boll_upper:.2f}\n\n中轨: {boll_mid:.2f}\n\n下轨: {boll_lower:.2f}\n\n判定: **{boll_rec}**")
 
+        st_dir = last.get("st_direction", 0)
+        st_val = last.get("st_value", 0)
+        st_rec = "多头趋势" if st_dir == 1 else "空头趋势" if st_dir == -1 else "未知"
+        detail_cols[4].markdown(f"**SuperTrend**\n\n方向: {'多头' if st_dir == 1 else '空头'}\n\n轨道: {st_val:.2f}\n\n判定: **{st_rec}**")
+
         chan_buys_all = chan_result["buy_points"]
         chan_sells_all = chan_result["sell_points"]
         all_chan_points = [(bp["dt"], "买", bp["type"]) for bp in chan_buys_all] + [(sp["dt"], "卖", sp["type"]) for sp in chan_sells_all]
         all_chan_points.sort(key=lambda x: x[0])
         recent_chan = f"{all_chan_points[-1][1]}({all_chan_points[-1][2]}) @ {str(all_chan_points[-1][0].date())}" if all_chan_points else "无近期信号"
-        detail_cols[4].markdown(f"**缠论**\n\n笔: {len(chan_result['bi_list'])}  中枢: {len(chan_result['zs_list'])}\n\n最近信号: **{recent_chan}**")
+        detail_cols[5].markdown(f"**缠论**\n\n笔: {len(chan_result['bi_list'])}  中枢: {len(chan_result['zs_list'])}\n\n最近信号: **{recent_chan}**")
 
         st.markdown("---")
         sig_cols = st.columns(3)
@@ -308,6 +313,15 @@ def page_detail():
         if "boll_upper" in signal_df.columns:
             fig.add_trace(go.Scatter(x=signal_df.index, y=signal_df["boll_upper"], name="BOLL上轨", line=dict(width=1, color="rgba(150,150,150,0.5)", dash="dot")), row=1, col=1)
             fig.add_trace(go.Scatter(x=signal_df.index, y=signal_df["boll_lower"], name="BOLL下轨", line=dict(width=1, color="rgba(150,150,150,0.5)", dash="dot"), fill="tonexty", fillcolor="rgba(150,150,150,0.05)"), row=1, col=1)
+
+        # SuperTrend 轨道
+        if "st_value" in signal_df.columns:
+            st_colors = ["#e74c3c" if d == 1 else "#27ae60" for d in signal_df["st_direction"]]
+            fig.add_trace(go.Scatter(
+                x=signal_df.index, y=signal_df["st_value"],
+                name="SuperTrend", mode="lines",
+                line=dict(width=2, color="#FF6F00", dash="dash"),
+            ), row=1, col=1)
 
         buys = [t for t in trades if t["action"] == "BUY"]
         sells = [t for t in trades if t["action"] == "SELL"]

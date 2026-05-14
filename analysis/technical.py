@@ -58,6 +58,86 @@ def volume_ratio(volume: pd.Series, period: int = 5) -> pd.Series:
     return volume / avg_vol
 
 
+def supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
+               atr_period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """SuperTrend 指标：ATR 自适应趋势跟踪通道
+
+    返回 DataFrame 含 st_upper, st_lower, st_direction, st_value 列
+    st_direction: 1=多头, -1=空头
+    st_value: 当前生效的轨道价格（多头时为下轨，空头时为上轨）
+    """
+    # 真实波幅 TR
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Wilder 平滑 ATR
+    atr = tr.ewm(alpha=1 / atr_period, min_periods=atr_period, adjust=False).mean()
+
+    # 基础频带
+    mid = (high + low) / 2
+    basic_upper = mid + multiplier * atr
+    basic_lower = mid - multiplier * atr
+
+    # 逐柱计算（频带仅在趋势方向上收紧）
+    n = len(close)
+    st_upper = np.full(n, np.nan)
+    st_lower = np.full(n, np.nan)
+    direction = np.full(n, np.nan)
+
+    # 找到第一根 ATR 有效的位置
+    first_valid = atr.first_valid_index()
+    if first_valid is None:
+        return pd.DataFrame({"st_upper": st_upper, "st_lower": st_lower,
+                              "st_direction": direction, "st_value": st_upper}, index=close.index)
+    start = close.index.get_loc(first_valid)
+
+    st_upper[start] = basic_upper.iloc[start]
+    st_lower[start] = basic_lower.iloc[start]
+    direction[start] = 1
+
+    for i in range(start + 1, n):
+        # 上轨：只能下移（收紧），不能上移
+        if basic_upper.iloc[i] < st_upper[i - 1] or close.iloc[i - 1] > st_upper[i - 1]:
+            st_upper[i] = basic_upper.iloc[i]
+        else:
+            st_upper[i] = st_upper[i - 1]
+
+        # 下轨：只能上移（收紧），不能下移
+        if basic_lower.iloc[i] > st_lower[i - 1] or close.iloc[i - 1] < st_lower[i - 1]:
+            st_lower[i] = basic_lower.iloc[i]
+        else:
+            st_lower[i] = st_lower[i - 1]
+
+        # 方向翻转
+        if direction[i - 1] == 1:
+            # 当前多头，价格跌破下轨则翻空
+            if close.iloc[i] < st_lower[i]:
+                direction[i] = -1
+            else:
+                direction[i] = 1
+        else:
+            # 当前空头，价格突破上轨则翻多
+            if close.iloc[i] > st_upper[i]:
+                direction[i] = 1
+            else:
+                direction[i] = -1
+
+    direction_s = pd.Series(direction, index=close.index)
+    st_upper_s = pd.Series(st_upper, index=close.index)
+    st_lower_s = pd.Series(st_lower, index=close.index)
+    # st_value：多头看下轨（支撑），空头看上轨（压力）
+    st_value = np.where(direction == 1, st_lower, st_upper)
+
+    return pd.DataFrame({
+        "st_upper": st_upper_s,
+        "st_lower": st_lower_s,
+        "st_direction": direction_s,
+        "st_value": pd.Series(st_value, index=close.index),
+    })
+
+
 # ========== 主函数 ==========
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,6 +163,11 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # 量比
     result["vol_ratio"] = volume_ratio(result["volume"])
+
+    # SuperTrend
+    st_cfg = TECHNICAL.get("supertrend", {"atr_period": 10, "multiplier": 3.0})
+    result = pd.concat([result, supertrend(result["high"], result["low"], result["close"],
+                                           st_cfg["atr_period"], st_cfg["multiplier"])], axis=1)
 
     return result
 
@@ -175,6 +260,21 @@ def _signal_boll(df: pd.DataFrame) -> pd.Series:
     return sig
 
 
+def _signal_supertrend(df: pd.DataFrame) -> pd.Series:
+    """SuperTrend 信号：方向翻转时触发"""
+    sig = pd.Series(0.0, index=df.index)
+    if "st_direction" not in df.columns:
+        return sig
+    d = df["st_direction"]
+    # 从空翻多（-1 → 1）
+    buy = (d == 1) & (d.shift(1) == -1)
+    # 从多翻空（1 → -1）
+    sell = (d == -1) & (d.shift(1) == 1)
+    sig.loc[buy] = 1.0
+    sig.loc[sell] = -1.0
+    return sig
+
+
 def _signal_volume_confirm(df: pd.DataFrame) -> pd.Series:
     """成交量确认信号：放量增强信号可信度，缩量降低可信度"""
     if "vol_ratio" not in df.columns:
@@ -191,12 +291,13 @@ def _signal_volume_confirm(df: pd.DataFrame) -> pd.Series:
 
 # 各维度权重
 SIGNAL_COMPONENT_WEIGHTS = {
-    "macd": 0.25,
-    "rsi": 0.10,
-    "kdj": 0.15,
-    "ma_cross": 0.15,
-    "ma_trend": 0.15,
-    "boll": 0.20,
+    "macd": 0.20,
+    "rsi": 0.08,
+    "kdj": 0.12,
+    "ma_cross": 0.12,
+    "ma_trend": 0.10,
+    "boll": 0.15,
+    "supertrend": 0.23,
 }
 
 
@@ -204,7 +305,7 @@ def generate_technical_signals(df: pd.DataFrame) -> pd.Series:
     """基于多维度技术指标生成交易信号
 
     策略逻辑：
-    1. 6个维度独立打分（MACD/RSI/KDJ/均线交叉/均线排列/布林带）
+    1. 7个维度独立打分（MACD/RSI/KDJ/均线交叉/均线排列/布林带/SuperTrend）
     2. 加权求和得到原始分数
     3. 成交量确认：放量增强信号，缩量削弱信号
     4. 归一化到 -1 ~ 1
@@ -219,6 +320,7 @@ def generate_technical_signals(df: pd.DataFrame) -> pd.Series:
         "ma_cross": _signal_ma_cross(df),
         "ma_trend": _signal_ma_trend(df),
         "boll": _signal_boll(df),
+        "supertrend": _signal_supertrend(df),
     }
 
     # 加权求和
