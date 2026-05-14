@@ -1,6 +1,0 @@
-{
-    "navigationBarTitleText": "股票分析",
-    "usingComponents": {
-        "ec-canvas": "../../ec-canvas/ec-canvas"
-    }
-}
