@@ -19,6 +19,24 @@ from analysis.chanlun import analyze as chanlun_analyze
 
 st.set_page_config(page_title="A股港股量化分析小程序", layout="wide")
 
+# 移动端适配 CSS
+st.markdown("""
+<style>
+@media (max-width: 768px) {
+    /* 侧边栏默认收起 */
+    [data-testid="stSidebar"] { min-width: 0; width: 0; }
+    /* 主内容区不留侧边栏间距 */
+    .main .block-container { padding-left: 1rem; padding-right: 1rem; max-width: 100%; }
+    /* 表格行可横向滚动 */
+    [data-testid="stHorizontalBlock"] { overflow-x: auto; flex-wrap: nowrap !important; }
+    [data-testid="stHorizontalBlock"] > div { min-width: 80px; flex-shrink: 0; }
+    /* 标题字号缩小 */
+    h1 { font-size: 1.5rem !important; }
+    h2, h3 { font-size: 1.2rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ========== 工具函数 ==========
 
