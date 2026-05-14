@@ -129,13 +129,13 @@ def page_overview():
         st.markdown(f"### {market_label}")
 
         # 表头
-        header_cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.5, 1])
-        for col, title in zip(header_cols, ["股票", "收盘价", "技术信号", "缠论信号", "推荐", "日期", ""]):
+        header_cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.2, 1.5, 1])
+        for col, title in zip(header_cols, ["股票", "收盘价", "技术信号", "缠论信号", "推荐", "仓位", "日期", ""]):
             col.markdown(f"**{title}**")
 
         # 数据行
         for _, row in market_df.iterrows():
-            cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.5, 1])
+            cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.2, 1.5, 1])
             cols[0].write(row["股票"])
             cols[1].write(row["收盘价"])
 
@@ -160,10 +160,17 @@ def page_overview():
             r_color = "#e74c3c" if rec == "买入" else "#27ae60" if rec == "卖出" else "#999"
             cols[4].markdown(f'<span style="color:{r_color};font-weight:bold">{rec}</span>', unsafe_allow_html=True)
 
-            cols[5].write(row["日期"])
+            # 仓位建议
+            pos = row.get("仓位建议", "")
+            if pos:
+                cols[5].markdown(f'<span style="color:{r_color};font-weight:bold">{pos}</span>', unsafe_allow_html=True)
+            else:
+                cols[5].write("")
+
+            cols[6].write(row["日期"])
 
             # 查看详情按钮
-            if cols[6].button("详情", key=f"btn_{row['_code']}"):
+            if cols[7].button("详情", key=f"btn_{row['_code']}"):
                 st.session_state["page"] = "单股票分析"
                 st.session_state["selected_code"] = row["_code"]
                 st.session_state["auto_analyze"] = True
