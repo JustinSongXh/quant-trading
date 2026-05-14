@@ -37,13 +37,14 @@ def scan_all() -> list[dict]:
 
             # 构建信号
             signal_df = build_signals(df, symbol=code, sentiment_scores=None)
-            decisions = fuse_signals(signal_df)
+            fusion_result = fuse_signals(signal_df)
 
             # 取最后一个交易日的信号
-            if len(decisions) == 0:
+            if len(fusion_result) == 0:
                 continue
 
-            today_decision = decisions.iloc[-1]
+            today_decision = fusion_result["decision"].iloc[-1]
+            today_strength = fusion_result["strength"].iloc[-1]
             today_date = str(signal_df.index[-1].date())
             today_close = signal_df.iloc[-1]["close"]
             today_tech = signal_df.iloc[-1]["technical_signal"]
@@ -51,17 +52,26 @@ def scan_all() -> list[dict]:
 
             if today_decision != 0:
                 action = "买入" if today_decision == 1 else "卖出"
+                # 仓位建议
+                from config.settings import POSITION_SIZING
+                pos_label = POSITION_SIZING[-1]["label"]
+                for tier in POSITION_SIZING:
+                    if today_strength >= tier["min_strength"]:
+                        pos_label = tier["label"]
+                        break
                 alert = {
                     "code": code,
                     "name": name,
                     "date": today_date,
                     "action": action,
                     "close": today_close,
+                    "strength": round(today_strength, 3),
+                    "position": pos_label,
                     "technical_signal": round(today_tech, 3),
                     "chanlun_signal": round(today_chan, 3),
                 }
                 alerts.append(alert)
-                logger.info(f"  >>> {name} {action} 信号! 收盘价={today_close:.2f}")
+                logger.info(f"  >>> {name} {action} 信号({pos_label})! 强度={today_strength:.3f} 收盘价={today_close:.2f}")
             else:
                 logger.info(f"  {name}: 无信号")
 

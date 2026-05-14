@@ -73,11 +73,21 @@ def page_overview():
         try:
             df = get_stock_data(code, days=400)
             signal_df = build_signals(df, symbol=code, sentiment_scores=None)
-            decisions = fuse_signals(signal_df)
+            fusion_result = fuse_signals(signal_df)
 
             last = signal_df.iloc[-1]
             last_date = str(signal_df.index[-1].date())
-            rec_text, _ = get_recommendation(decisions.iloc[-1])
+            last_strength = fusion_result["strength"].iloc[-1]
+            rec_text, _ = get_recommendation(fusion_result["decision"].iloc[-1])
+
+            # 仓位建议
+            from config.settings import POSITION_SIZING
+            pos_label = ""
+            if rec_text != "观望":
+                for tier in POSITION_SIZING:
+                    if last_strength >= tier["min_strength"]:
+                        pos_label = tier["label"]
+                        break
 
             rows.append({
                 "市场": "港股" if market == "HK" else "A股",
@@ -86,6 +96,7 @@ def page_overview():
                 "技术信号": round(last.get("technical_signal", 0), 3),
                 "缠论信号": round(last.get("chanlun_signal", 0), 3),
                 "综合推荐": rec_text,
+                "仓位建议": pos_label,
                 "日期": last_date,
                 "_code": code,
             })
@@ -214,8 +225,9 @@ def page_detail():
             df = df.loc[df.index >= cutoff]
 
             signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
-            decisions = fuse_signals(signal_df)
-            result = run_backtest(symbol, signal_df, decisions)
+            fusion_result = fuse_signals(signal_df)
+            decisions = fusion_result["decision"]
+            result = run_backtest(symbol, signal_df, fusion_result)
             metrics = calc_metrics(result["net_values"], result["initial_capital"])
             trades = result["trade_log"]
             chan_result = chanlun_analyze(df, symbol)
@@ -238,13 +250,29 @@ def page_detail():
         last_date = str(signal_df.index[-1].date())
         last_close = last["close"]
         last_decision = decisions.iloc[-1]
+        last_strength = fusion_result["strength"].iloc[-1]
         rec_text, rec_color = get_recommendation(last_decision)
+
+        # 仓位建议
+        pos_label = ""
+        pos_pct = ""
+        if rec_text != "观望":
+            from config.settings import POSITION_SIZING
+            for tier in POSITION_SIZING:
+                if last_strength >= tier["min_strength"]:
+                    pos_label = tier["label"]
+                    pos_pct = f"{int(tier['position_pct'] * 100)}%"
+                    break
+
+        pos_display = f'<span style="font-size:16px;color:#666;margin-left:20px">仓位建议: </span><span style="font-size:20px;font-weight:bold;color:{rec_color}">{pos_label} ({pos_pct})</span>' if pos_label else ""
 
         st.markdown(
             f'<div style="background:#f8f9fa;border-radius:8px;padding:16px 24px;margin-bottom:16px">'
             f'<span style="font-size:16px;color:#666">综合推荐（{last_date}）</span>'
             f'<span style="font-size:32px;font-weight:bold;color:{rec_color};margin-left:20px">{rec_text}</span>'
             f'<span style="font-size:16px;color:#666;margin-left:20px">收盘价 {last_close:.2f}</span>'
+            f'<span style="font-size:16px;color:#666;margin-left:20px">信号强度 {last_strength:.2f}</span>'
+            f'{pos_display}'
             f'</div>',
             unsafe_allow_html=True,
         )

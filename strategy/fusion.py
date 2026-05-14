@@ -1,20 +1,17 @@
 """多信号融合决策"""
 
 import pandas as pd
+import numpy as np
 from config.settings import SIGNAL_WEIGHTS
 
 
-def fuse_signals(df: pd.DataFrame) -> pd.Series:
-    """将技术信号、缠论信号和情绪信号加权融合，输出最终决策
-
-    融合逻辑：
-    1. 三路信号加权合并
-    2. 缠论买卖点作为强信号可直接触发交易
-    3. 技术信号需要连续确认
-    4. 情绪信号缺失时重新分配权重
+def fuse_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """将技术信号、缠论信号和情绪信号加权融合，输出决策和信号强度
 
     Returns:
-        Series: 1=买入, -1=卖出, 0=持有
+        DataFrame 含两列:
+        - decision: 1=买入, -1=卖出, 0=持有
+        - strength: 信号强度 0~1（用于动态仓位）
     """
     w_tech = SIGNAL_WEIGHTS["technical"]
     w_chan = SIGNAL_WEIGHTS["chanlun"]
@@ -27,16 +24,22 @@ def fuse_signals(df: pd.DataFrame) -> pd.Series:
                     + df["chanlun_signal"] * w_chan
                     + df["sentiment_signal"] * w_sent)
     else:
-        # 情绪缺失时，权重重分配给技术和缠论
         combined = (df["technical_signal"] * (w_tech + w_sent * 0.5)
                     + df["chanlun_signal"] * (w_chan + w_sent * 0.5))
 
     decision = pd.Series(0, index=df.index)
+    strength = pd.Series(0.0, index=df.index)
 
     # 缠论强信号（B1/S1 = ±1.0）可直接触发
     chan = df["chanlun_signal"]
-    decision.loc[chan >= 0.9] = 1
-    decision.loc[chan <= -0.9] = -1
+    chan_buy = chan >= 0.9
+    chan_sell = chan <= -0.9
+    decision.loc[chan_buy] = 1
+    decision.loc[chan_sell] = -1
+    strength.loc[chan_buy] = combined.loc[chan_buy].abs().clip(0, 1)
+    strength.loc[chan_sell] = combined.loc[chan_sell].abs().clip(0, 1)
+    # 缠论强信号保底 0.7 强度
+    strength.loc[chan_buy | chan_sell] = strength.loc[chan_buy | chan_sell].clip(lower=0.7)
 
     # 非缠论强信号时，用融合分数 + 连续确认
     no_chan_trigger = (decision == 0)
@@ -47,5 +50,7 @@ def fuse_signals(df: pd.DataFrame) -> pd.Series:
 
     decision.loc[buy_cond] = 1
     decision.loc[sell_cond] = -1
+    strength.loc[buy_cond] = combined.loc[buy_cond].abs().clip(0, 1)
+    strength.loc[sell_cond] = combined.loc[sell_cond].abs().clip(0, 1)
 
-    return decision
+    return pd.DataFrame({"decision": decision, "strength": strength}, index=df.index)

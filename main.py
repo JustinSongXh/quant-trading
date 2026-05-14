@@ -36,10 +36,10 @@ def run(symbols: list[str] | None = None):
         signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
 
         # 3. 融合决策
-        decisions = fuse_signals(signal_df)
+        fusion_result = fuse_signals(signal_df)
 
         # 4. 回测
-        result = run_backtest(symbol, signal_df, decisions)
+        result = run_backtest(symbol, signal_df, fusion_result)
 
         # 5. 计算绩效
         metrics = calc_metrics(result["net_values"], result["initial_capital"])

@@ -88,6 +88,13 @@ BACKTEST_HK = {
     "lot_size": 100,                    # 默认每手100股（实际每只不同）
 }
 
+# ========== 动态仓位分级（按信号强度）==========
+POSITION_SIZING = [
+    {"min_strength": 0.7, "position_pct": 0.30, "label": "重仓"},  # 强信号
+    {"min_strength": 0.3, "position_pct": 0.20, "label": "标准仓"},  # 中信号
+    {"min_strength": 0.0, "position_pct": 0.10, "label": "轻仓"},  # 弱信号
+]
+
 # ========== 涨跌停规则 ==========
 LIMIT_RULES = {
     "main_board": 0.10,    # 主板 ±10%

@@ -3,16 +3,29 @@
 import pandas as pd
 from backtest.broker import Broker
 from data.fetcher import fetch_stock_info
-from config.settings import BACKTEST, BACKTEST_HK
+from config.settings import BACKTEST, BACKTEST_HK, POSITION_SIZING
 
 
-def run_backtest(symbol: str, signal_df: pd.DataFrame, decisions: pd.Series) -> dict:
+def _calc_position_pct(strength: float) -> float:
+    """根据信号强度计算仓位比例
+
+    强信号（>0.7）→ 重仓
+    中信号（0.3-0.7）→ 标准仓
+    弱信号（<0.3）→ 轻仓
+    """
+    for tier in POSITION_SIZING:
+        if strength >= tier["min_strength"]:
+            return tier["position_pct"]
+    return POSITION_SIZING[-1]["position_pct"]
+
+
+def run_backtest(symbol: str, signal_df: pd.DataFrame, fusion_result: pd.DataFrame) -> dict:
     """运行单只股票回测
 
     Args:
         symbol: 股票代码
         signal_df: 包含 OHLCV 数据的 DataFrame
-        decisions: 每日决策 Series（1=买, -1=卖, 0=持有）
+        fusion_result: DataFrame 含 decision 和 strength 列
 
     Returns:
         回测结果 dict，含净值曲线和交易记录
@@ -30,11 +43,13 @@ def run_backtest(symbol: str, signal_df: pd.DataFrame, decisions: pd.Series) -> 
         prev_row = signal_df.iloc[i - 1]
         price = row["close"]
         prev_close = prev_row["close"]
-        decision = decisions.iloc[i]
+        decision = fusion_result["decision"].iloc[i]
+        strength = fusion_result["strength"].iloc[i]
 
-        # 涨停不能买，跌停不能卖（港股无此限制）
         if decision == 1 and not broker.is_limit_up(prev_close, price, board):
-            max_spend = broker.cash * cfg["max_position_pct"]
+            # 动态仓位：根据信号强度决定买多少
+            position_pct = _calc_position_pct(strength)
+            max_spend = broker.cash * position_pct
             shares = int(max_spend / price)
             broker.buy(symbol, price, shares, date, board)
         elif decision == -1 and not broker.is_limit_down(prev_close, price, board):
