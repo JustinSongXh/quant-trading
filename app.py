@@ -9,7 +9,7 @@ from config.settings import load_stock_pool, get_stock_name, add_stock, remove_s
 from data.fetcher import fetch_daily_kline, is_hk_stock
 from data.stock_list import search_stocks, get_all_stocks
 from data.mock import fetch_mock_kline
-from data.cache import save_kline, load_kline
+from data.cache import save_kline, load_kline, is_cache_fresh, is_during_trading
 from strategy.signals import build_signals
 from strategy.fusion import fuse_signals
 from backtest.engine import run_backtest
@@ -22,8 +22,8 @@ st.set_page_config(page_title="A股港股量化分析系统", layout="wide")
 # ========== 工具函数 ==========
 
 def get_stock_data(code, days=365, force_refresh=False):
-    """获取股票数据，优先用缓存，避免重复请求接口"""
-    if not force_refresh:
+    """获取股票数据，优先用新鲜缓存，过期则刷新"""
+    if not force_refresh and is_cache_fresh(code):
         df = load_kline(code)
         if df is not None and len(df) > 0:
             return df
@@ -52,6 +52,10 @@ def get_recommendation(decision):
 def page_overview():
     st.title("A股港股量化分析系统")
     st.subheader("全局信号总览")
+
+    # 盘中提示
+    if is_during_trading("000001") or is_during_trading("00700"):
+        st.warning("当前为交易时段，数据可能为盘中快照，非收盘价。收盘后刷新页面获取最终数据。")
 
     stocks = load_stock_pool()
     a_stocks = [s for s in stocks if s.get("market", "A") == "A"]
