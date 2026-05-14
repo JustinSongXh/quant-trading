@@ -8,6 +8,7 @@ import pandas as pd
 from config.settings import load_stock_pool, get_stock_name, add_stock, remove_stock
 from data.fetcher import fetch_daily_kline, is_hk_stock
 from data.stock_list import search_stocks, get_all_stocks
+from data.realtime import get_realtime_quotes
 from data.mock import fetch_mock_kline
 from data.cache import save_kline, load_kline, is_cache_fresh, is_during_trading
 from strategy.signals import build_signals
@@ -16,7 +17,7 @@ from backtest.engine import run_backtest
 from backtest.metrics import calc_metrics
 from analysis.chanlun import analyze as chanlun_analyze
 
-st.set_page_config(page_title="A股港股量化分析系统", layout="wide")
+st.set_page_config(page_title="A股港股量化分析小程序", layout="wide")
 
 
 # ========== 工具函数 ==========
@@ -49,27 +50,19 @@ def get_recommendation(decision):
 
 # ========== 全局信号总览页 ==========
 
-def page_overview():
-    st.title("A股港股量化分析系统")
-    st.subheader("全局信号总览")
-
-    # 盘中提示
-    if is_during_trading("000001") or is_during_trading("00700"):
-        st.warning("当前为交易时段，数据可能为盘中快照，非收盘价。收盘后刷新页面获取最终数据。")
-
+def _scan_all_stocks(progress=None):
+    """扫描全部股票，返回结果列表"""
     stocks = load_stock_pool()
-    a_stocks = [s for s in stocks if s.get("market", "A") == "A"]
-    hk_stocks = [s for s in stocks if s.get("market") == "HK"]
-
-    progress = st.progress(0, text="正在扫描...")
-    rows = []
+    all_codes = [s["code"] for s in stocks]
+    realtime = get_realtime_quotes(all_codes)
     total = len(stocks)
 
+    rows = []
     for i, stock in enumerate(stocks):
+        if progress:
+            progress.progress((i + 1) / total, text=f"扫描 {stock['name']}({stock['code']})...")
         code, name = stock["code"], stock["name"]
         market = stock.get("market", "A")
-        progress.progress((i + 1) / total, text=f"扫描 {name}({code})...")
-
         try:
             df = get_stock_data(code, days=400)
             signal_df = build_signals(df, symbol=code, sentiment_scores=None)
@@ -80,7 +73,11 @@ def page_overview():
             last_strength = fusion_result["strength"].iloc[-1]
             rec_text, _ = get_recommendation(fusion_result["decision"].iloc[-1])
 
-            # 仓位建议
+            prev_close = round(float(last["close"]), 2)
+            rt = realtime.get(code)
+            cur_price = rt["price"] if rt else prev_close
+            change_pct = rt["change_pct"] if rt else 0.0
+
             from config.settings import POSITION_SIZING
             pos_label = ""
             if rec_text != "观望":
@@ -92,28 +89,42 @@ def page_overview():
             rows.append({
                 "市场": "港股" if market == "HK" else "A股",
                 "股票": f"{name}({code})",
-                "收盘价": round(last["close"], 2),
+                "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
                 "技术信号": round(last.get("technical_signal", 0), 3),
                 "缠论信号": round(last.get("chanlun_signal", 0), 3),
-                "综合推荐": rec_text,
-                "仓位建议": pos_label,
-                "日期": last_date,
-                "_code": code,
+                "综合推荐": rec_text, "仓位建议": pos_label,
+                "日期": last_date, "_code": code,
             })
-        except Exception as e:
+        except Exception:
             rows.append({
                 "市场": "港股" if market == "HK" else "A股",
                 "股票": f"{name}({code})",
-                "收盘价": "-",
-                "技术信号": "-",
-                "缠论信号": "-",
-                "综合推荐": "数据异常",
-                "日期": "-",
-                "_code": code,
+                "昨收": "-", "现价": "-", "涨跌幅": "-",
+                "技术信号": "-", "缠论信号": "-",
+                "综合推荐": "数据异常", "仓位建议": "",
+                "日期": "-", "_code": code,
             })
+    return rows
 
-    progress.empty()
 
+def page_overview():
+    st.title("A股港股量化分析小程序")
+    st.subheader("全局信号总览")
+
+    # 盘中判断
+    a_trading = is_during_trading("000001")
+    hk_trading = is_during_trading("00700")
+    if a_trading or hk_trading:
+        st.warning("当前为交易时段，数据为盘中快照，非收盘价。收盘后刷新页面获取最终数据。")
+
+    # 有缓存用缓存（点详情返回时秒开），点刷新按钮重新扫描
+    need_refresh = st.sidebar.button("刷新数据", type="primary")
+    if need_refresh or "overview_rows" not in st.session_state:
+        progress = st.progress(0, text="正在扫描...")
+        st.session_state["overview_rows"] = _scan_all_stocks(progress)
+        progress.empty()
+
+    rows = st.session_state["overview_rows"]
     if not rows:
         st.warning("股票池为空")
         return
@@ -128,49 +139,65 @@ def page_overview():
 
         st.markdown(f"### {market_label}")
 
-        # 表头
-        header_cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.2, 1.5, 1])
-        for col, title in zip(header_cols, ["股票", "收盘价", "技术信号", "缠论信号", "推荐", "仓位", "日期", ""]):
+        # 表头：盘中显示"当前价"，收盘后显示"收盘价"
+        is_trading = a_trading if market_key == "A股" else hk_trading
+        price_label = "当前价" if is_trading else "收盘价"
+
+        # 昨收日期（从第一条数据取，所有股票同市场日期一样）
+        sample = market_df.iloc[0] if len(market_df) > 0 else None
+        prev_date = sample["日期"] if sample is not None else ""
+        prev_label = f"前收({prev_date[5:]})" if prev_date else "前收"
+
+        header_cols = st.columns([2.5, 1.2, 1.2, 1, 1.2, 1.2, 1, 1, 0.8])
+        for col, title in zip(header_cols, ["股票", price_label, prev_label, "涨跌幅", "技术信号", "缠论信号", "推荐", "仓位", ""]):
             col.markdown(f"**{title}**")
 
         # 数据行
         for _, row in market_df.iterrows():
-            cols = st.columns([3, 1.5, 1.5, 1.5, 1.2, 1.2, 1.5, 1])
+            cols = st.columns([2.5, 1.2, 1.2, 1, 1.2, 1.2, 1, 1, 0.8])
             cols[0].write(row["股票"])
-            cols[1].write(row["收盘价"])
+            cols[1].write(row["现价"])
+            cols[2].write(row["昨收"])
+
+            # 涨跌幅带颜色
+            chg = row["涨跌幅"]
+            if isinstance(chg, (int, float)):
+                chg_color = "#e74c3c" if chg > 0 else "#27ae60" if chg < 0 else "#666"
+                chg_prefix = "+" if chg > 0 else ""
+                cols[3].markdown(f'<span style="color:{chg_color};font-weight:bold">{chg_prefix}{chg}%</span>', unsafe_allow_html=True)
+            else:
+                cols[3].write(chg)
 
             # 技术信号带颜色
             tech = row["技术信号"]
             if isinstance(tech, (int, float)):
                 t_color = "#e74c3c" if tech > 0.1 else "#27ae60" if tech < -0.1 else "#666"
-                cols[2].markdown(f'<span style="color:{t_color}">{tech:.3f}</span>', unsafe_allow_html=True)
+                cols[4].markdown(f'<span style="color:{t_color}">{tech:.3f}</span>', unsafe_allow_html=True)
             else:
-                cols[2].write(tech)
+                cols[4].write(tech)
 
             # 缠论信号带颜色
             chan = row["缠论信号"]
             if isinstance(chan, (int, float)):
                 c_color = "#e74c3c" if chan > 0.1 else "#27ae60" if chan < -0.1 else "#666"
-                cols[3].markdown(f'<span style="color:{c_color}">{chan:.3f}</span>', unsafe_allow_html=True)
+                cols[5].markdown(f'<span style="color:{c_color}">{chan:.3f}</span>', unsafe_allow_html=True)
             else:
-                cols[3].write(chan)
+                cols[5].write(chan)
 
             # 推荐带颜色
             rec = row["综合推荐"]
             r_color = "#e74c3c" if rec == "买入" else "#27ae60" if rec == "卖出" else "#999"
-            cols[4].markdown(f'<span style="color:{r_color};font-weight:bold">{rec}</span>', unsafe_allow_html=True)
+            cols[6].markdown(f'<span style="color:{r_color};font-weight:bold">{rec}</span>', unsafe_allow_html=True)
 
             # 仓位建议
             pos = row.get("仓位建议", "")
             if pos:
-                cols[5].markdown(f'<span style="color:{r_color};font-weight:bold">{pos}</span>', unsafe_allow_html=True)
+                cols[7].markdown(f'<span style="color:{r_color};font-weight:bold">{pos}</span>', unsafe_allow_html=True)
             else:
-                cols[5].write("")
-
-            cols[6].write(row["日期"])
+                cols[7].write("")
 
             # 查看详情按钮
-            if cols[7].button("详情", key=f"btn_{row['_code']}"):
+            if cols[8].button("详情", key=f"btn_{row['_code']}"):
                 st.session_state["page"] = "单股票分析"
                 st.session_state["selected_code"] = row["_code"]
                 st.session_state["auto_analyze"] = True
@@ -180,7 +207,7 @@ def page_overview():
 # ========== 单股票详细分析页 ==========
 
 def page_detail():
-    st.title("A股港股量化分析系统")
+    st.title("A股港股量化分析小程序")
 
     # 侧边栏：按市场分组选股
     stocks = load_stock_pool()
@@ -442,7 +469,7 @@ def page_detail():
 # ========== 股票池管理页 ==========
 
 def page_manage():
-    st.title("A股港股量化分析系统")
+    st.title("A股港股量化分析小程序")
     st.subheader("股票池管理")
 
     pool = load_stock_pool()
@@ -536,6 +563,7 @@ def page_manage():
 pages = ["全局信号总览", "单股票分析", "股票池管理"]
 default_page = st.session_state.get("page", "全局信号总览")
 default_idx = pages.index(default_page) if default_page in pages else 0
+
 page = st.sidebar.radio("页面", pages, index=default_idx)
 st.session_state["page"] = page
 

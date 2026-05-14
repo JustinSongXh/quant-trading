@@ -121,14 +121,23 @@ def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
 # ========== 统一入口 ==========
 
 def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
-    """获取个股日K线数据（前复权），自动识别 A 股/港股"""
+    """获取个股日K线数据（前复权），自动识别 A 股/港股
+
+    注意：盘中获取的当天数据不完整，自动剔除今天的行，只保留已收盘的数据。
+    """
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
     if is_hk_stock(symbol):
-        return _fetch_hk_stock(symbol, start, end)
+        df = _fetch_hk_stock(symbol, start, end)
     else:
-        return _fetch_a_stock(symbol, start, end)
+        df = _fetch_a_stock(symbol, start, end)
+
+    # 剔除今天未收盘的数据
+    today = pd.Timestamp(datetime.now().date())
+    df = df[df.index < today]
+
+    return df
 
 
 def fetch_stock_info(symbol: str) -> dict:

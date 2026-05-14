@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  # Streamlit 前端 + FastAPI 后端
+  app:
+    build: .
+    container_name: quant-app
+    command: >
+      sh -c "
+        uvicorn api.server:app --host 0.0.0.0 --port 8000 &
+        streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+      "
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./:/app
+    ports:
+      - "8501:8501"
+      - "8000:8000"
+    restart: unless-stopped
+
+  # Cloudflare Tunnel
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: quant-tunnel
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - app
+    restart: unless-stopped
