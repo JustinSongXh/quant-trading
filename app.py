@@ -157,11 +157,13 @@ def _build_overview_rows(weights=None):
 
         from config.settings import POSITION_SIZING
         pos_label = ""
-        if rec_text != "观望":
+        if rec_text == "买入":
             for tier in POSITION_SIZING:
                 if last_strength >= tier["min_strength"]:
                     pos_label = tier["label"]
                     break
+        elif rec_text == "卖出":
+            pos_label = "清仓"
 
         rows.append({
             **meta,
@@ -453,13 +455,15 @@ def page_detail():
         # 仓位建议
         pos_label = ""
         pos_pct = ""
-        if rec_text != "观望":
+        if rec_text == "买入":
             from config.settings import POSITION_SIZING
             for tier in POSITION_SIZING:
                 if last_strength >= tier["min_strength"]:
                     pos_label = tier["label"]
                     pos_pct = f"{int(tier['position_pct'] * 100)}%"
                     break
+        elif rec_text == "卖出":
+            pos_label = "清仓"
 
         pos_display = f'<span style="font-size:16px;color:#666;margin-left:20px">仓位建议: </span><span style="font-size:20px;font-weight:bold;color:{rec_color}">{pos_label} ({pos_pct})</span>' if pos_label else ""
 

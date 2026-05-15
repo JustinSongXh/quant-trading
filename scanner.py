@@ -55,12 +55,15 @@ def scan_all() -> list[dict]:
             if today_decision != 0:
                 action = "买入" if today_decision == 1 else "卖出"
                 # 仓位建议
-                from config.settings import POSITION_SIZING
-                pos_label = POSITION_SIZING[-1]["label"]
-                for tier in POSITION_SIZING:
-                    if today_strength >= tier["min_strength"]:
-                        pos_label = tier["label"]
-                        break
+                if action == "买入":
+                    from config.settings import POSITION_SIZING
+                    pos_label = POSITION_SIZING[-1]["label"]
+                    for tier in POSITION_SIZING:
+                        if today_strength >= tier["min_strength"]:
+                            pos_label = tier["label"]
+                            break
+                else:
+                    pos_label = "清仓"
                 alert = {
                     "code": code,
                     "name": name,
