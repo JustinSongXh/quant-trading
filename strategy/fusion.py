@@ -5,27 +5,45 @@ import numpy as np
 from config.settings import SIGNAL_WEIGHTS
 
 
-def fuse_signals(df: pd.DataFrame) -> pd.DataFrame:
-    """将技术信号、缠论信号和情绪信号加权融合，输出决策和信号强度
+def fuse_signals(df: pd.DataFrame, weights: dict[str, float] | None = None) -> pd.DataFrame:
+    """将各信号源加权融合，输出决策和信号强度
+
+    Args:
+        df: 含 technical_signal, chanlun_signal, kronos_signal, sentiment_signal 列
+        weights: 自定义权重 {"technical": 0.4, "chanlun": 0.3, ...}，None 用默认值
 
     Returns:
         DataFrame 含两列:
         - decision: 1=买入, -1=卖出, 0=持有
         - strength: 信号强度 0~1（用于动态仓位）
     """
-    w_tech = SIGNAL_WEIGHTS["technical"]
-    w_chan = SIGNAL_WEIGHTS["chanlun"]
-    w_sent = SIGNAL_WEIGHTS["sentiment"]
+    if weights is None:
+        weights = dict(SIGNAL_WEIGHTS)
 
-    has_sentiment = (df["sentiment_signal"].abs() > 0).any()
+    # 收集实际有信号的源（非全零才算有效）
+    signal_cols = {
+        "technical": "technical_signal",
+        "chanlun": "chanlun_signal",
+        "kronos": "kronos_signal",
+        "sentiment": "sentiment_signal",
+    }
 
-    if has_sentiment:
-        combined = (df["technical_signal"] * w_tech
-                    + df["chanlun_signal"] * w_chan
-                    + df["sentiment_signal"] * w_sent)
-    else:
-        combined = (df["technical_signal"] * (w_tech + w_sent * 0.5)
-                    + df["chanlun_signal"] * (w_chan + w_sent * 0.5))
+    active_weights = {}
+    for key, col in signal_cols.items():
+        if col in df.columns and (df[col].abs() > 0).any() and weights.get(key, 0) > 0:
+            active_weights[key] = weights[key]
+
+    # 没有任何有效信号时，全部持有
+    if not active_weights:
+        return pd.DataFrame({"decision": 0, "strength": 0.0}, index=df.index)
+
+    # 归一化权重（使权重和为 1）
+    total_w = sum(active_weights.values())
+    norm_weights = {k: v / total_w for k, v in active_weights.items()}
+
+    combined = pd.Series(0.0, index=df.index)
+    for key, w in norm_weights.items():
+        combined += df[signal_cols[key]] * w
 
     decision = pd.Series(0, index=df.index)
     strength = pd.Series(0.0, index=df.index)

@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
-from config.settings import load_stock_pool, get_stock_name, get_stock_type, add_stock, remove_stock
+from config.settings import load_stock_pool, get_stock_name, get_stock_type, add_stock, remove_stock, SIGNAL_WEIGHTS
 from data.fetcher import fetch_daily_kline, is_hk_stock, is_index
 from data.stock_list import search_stocks, get_all_stocks
 from data.realtime import get_realtime_quotes
@@ -70,70 +70,105 @@ def get_recommendation(decision):
 
 # ========== 全局信号总览页 ==========
 
-def _scan_all_stocks(progress=None):
-    """扫描全部股票，返回结果列表"""
+def _scan_all_stocks(progress=None, enabled_signals=None, kronos_progress=None):
+    """扫描全部股票，计算信号并缓存到 session_state"""
     stocks = load_stock_pool()
     all_codes = [s["code"] for s in stocks]
     type_map = {s["code"]: s.get("type", "stock") for s in stocks}
     realtime = get_realtime_quotes(all_codes, type_map=type_map)
     total = len(stocks)
 
-    rows = []
+    use_kronos = enabled_signals and "kronos" in enabled_signals
+
+    cached = {}  # {code: {"signal_df": ..., "meta": ...}}
     for i, stock in enumerate(stocks):
-        if progress:
-            progress.progress((i + 1) / total, text=f"扫描 {stock['name']}({stock['code']})...")
         code, name = stock["code"], stock["name"]
+        if progress:
+            kronos_hint = "（含 Kronos 预测）" if use_kronos else ""
+            progress.progress((i + 1) / total, text=f"扫描 {name}({code}){kronos_hint}...")
         market = stock.get("market", "A")
         stype = stock.get("type", "stock")
+        cache_id = f"{code}_{stype}"
+
+        def _kronos_cb(cur, tot, msg):
+            if kronos_progress:
+                if cur < tot:
+                    kronos_progress.progress(cur / tot, text=f"{name}: {msg}")
+                else:
+                    kronos_progress.empty()
+
         try:
             df = get_stock_data(code, days=400, stock_type=stype)
-            signal_df = build_signals(df, symbol=code, sentiment_scores=None)
-            fusion_result = fuse_signals(signal_df)
+            signal_df = build_signals(df, symbol=code, sentiment_scores=None,
+                                       enabled_signals=enabled_signals,
+                                       progress_cb=_kronos_cb if use_kronos else None)
 
-            last = signal_df.iloc[-1]
-            last_date = str(signal_df.index[-1].date())
-            last_strength = fusion_result["strength"].iloc[-1]
-            rec_text, _ = get_recommendation(fusion_result["decision"].iloc[-1])
-
-            # 昨收：如果最后一根K线是今天，取倒数第二根
             from datetime import date as _date
+            last = signal_df.iloc[-1]
             if signal_df.index[-1].date() == _date.today() and len(signal_df) >= 2:
                 prev_close = round(float(signal_df.iloc[-2]["close"]), 2)
                 last_date = str(signal_df.index[-2].date())
             else:
                 prev_close = round(float(last["close"]), 2)
+                last_date = str(signal_df.index[-1].date())
             rt = realtime.get(code)
             cur_price = rt["price"] if rt else prev_close
             change_pct = rt["change_pct"] if rt else 0.0
-
-            from config.settings import POSITION_SIZING
-            pos_label = ""
-            if rec_text != "观望":
-                for tier in POSITION_SIZING:
-                    if last_strength >= tier["min_strength"]:
-                        pos_label = tier["label"]
-                        break
-
             market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
-            rows.append({
-                "市场": market_label,
-                "股票": f"{name}({code})",
-                "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
-                "技术信号": round(last.get("technical_signal", 0), 3),
-                "缠论信号": round(last.get("chanlun_signal", 0), 3),
-                "综合推荐": rec_text, "仓位建议": pos_label,
-                "日期": last_date, "_code": code, "_type": stype,
-            })
+
+            cached[cache_id] = {
+                "signal_df": signal_df,
+                "meta": {
+                    "市场": market_label, "股票": f"{name}({code})",
+                    "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
+                    "日期": last_date, "_code": code, "_type": stype,
+                },
+            }
         except Exception:
             market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
-            rows.append({
-                "市场": market_label,
-                "股票": f"{name}({code})",
-                "昨收": "-", "现价": "-", "涨跌幅": "-",
-                "技术信号": "-", "缠论信号": "-",
-                "综合推荐": "数据异常", "仓位建议": "",
-                "日期": "-", "_code": code, "_type": stype,
-            })
+            cached[cache_id] = {
+                "signal_df": None,
+                "meta": {
+                    "市场": market_label, "股票": f"{name}({code})",
+                    "昨收": "-", "现价": "-", "涨跌幅": "-",
+                    "日期": "-", "_code": code, "_type": stype,
+                },
+            }
+
+    st.session_state["overview_cache"] = cached
+
+
+def _build_overview_rows(weights=None):
+    """从缓存的信号数据重新融合，生成展示行（不拉数据，瞬间完成）"""
+    cached = st.session_state.get("overview_cache", {})
+    rows = []
+    for cache_id, item in cached.items():
+        meta = item["meta"]
+        signal_df = item["signal_df"]
+        if signal_df is None:
+            rows.append({**meta, "技术信号": "-", "缠论信号": "-",
+                         "综合推荐": "数据异常", "仓位建议": ""})
+            continue
+
+        fusion_result = fuse_signals(signal_df, weights=weights)
+        last = signal_df.iloc[-1]
+        last_strength = fusion_result["strength"].iloc[-1]
+        rec_text, _ = get_recommendation(fusion_result["decision"].iloc[-1])
+
+        from config.settings import POSITION_SIZING
+        pos_label = ""
+        if rec_text != "观望":
+            for tier in POSITION_SIZING:
+                if last_strength >= tier["min_strength"]:
+                    pos_label = tier["label"]
+                    break
+
+        rows.append({
+            **meta,
+            "技术信号": round(last.get("technical_signal", 0), 3),
+            "缠论信号": round(last.get("chanlun_signal", 0), 3),
+            "综合推荐": rec_text, "仓位建议": pos_label,
+        })
     return rows
 
 
@@ -147,14 +182,64 @@ def page_overview():
     if a_trading or hk_trading:
         st.warning("当前为交易时段，数据为盘中快照，非收盘价。收盘后刷新页面获取最终数据。")
 
-    # 有缓存用缓存（点详情返回时秒开），点刷新按钮重新扫描
-    need_refresh = st.sidebar.button("刷新数据", type="primary")
-    if need_refresh or "overview_rows" not in st.session_state:
-        progress = st.progress(0, text="正在扫描...")
-        st.session_state["overview_rows"] = _scan_all_stocks(progress)
-        progress.empty()
+    # 信号源配置
+    st.sidebar.markdown("**信号源配置**")
+    ov_signal_labels = {"technical": "技术指标", "chanlun": "缠论", "kronos": "Kronos 模型"}
+    ov_enabled = []
+    ov_weights = {}
+    for key, label in ov_signal_labels.items():
+        default_on = SIGNAL_WEIGHTS.get(key, 0) > 0
+        col_cb, col_w = st.sidebar.columns([1, 1])
+        on = col_cb.checkbox(label, value=default_on, key=f"ov_sig_{key}")
+        if on:
+            ov_enabled.append(key)
+            default_w = SIGNAL_WEIGHTS.get(key, 0.0) or 0.3
+            w = col_w.number_input("权重", min_value=0.0, max_value=1.0,
+                                    value=default_w, step=0.05, key=f"ov_w_{key}",
+                                    label_visibility="collapsed")
+            ov_weights[key] = w
+        else:
+            ov_weights[key] = 0.0
+    st.sidebar.markdown("---")
 
-    rows = st.session_state["overview_rows"]
+    # 两个按钮：刷新数据（重新拉数据+算信号）、重新推荐（用当前配置重新算信号+融合）
+    btn_cols = st.sidebar.columns(2)
+    need_refresh = btn_cols[0].button("刷新数据", type="primary")
+    need_recalc = btn_cols[1].button("重新推荐")
+
+    if need_refresh or "overview_cache" not in st.session_state:
+        progress = st.progress(0, text="正在扫描...")
+        kronos_bar = st.empty() if "kronos" in ov_enabled else None
+        _scan_all_stocks(progress, enabled_signals=ov_enabled, kronos_progress=kronos_bar)
+        st.session_state["overview_computed_signals"] = list(ov_enabled)
+        progress.empty()
+        if kronos_bar:
+            kronos_bar.empty()
+    elif need_recalc:
+        # 用当前配置重新计算信号（不重新拉数据）
+        progress = st.progress(0, text="正在重新计算...")
+        kronos_bar = st.empty() if "kronos" in ov_enabled else None
+        _scan_all_stocks(progress, enabled_signals=ov_enabled, kronos_progress=kronos_bar)
+        st.session_state["overview_computed_signals"] = list(ov_enabled)
+        progress.empty()
+        if kronos_bar:
+            kronos_bar.empty()
+
+    # 从缓存读取结果展示
+    last_computed = st.session_state.get("overview_computed_signals", [])
+    rows = _build_overview_rows(weights=ov_weights)
+
+    # 显示当前生效的信号配置
+    active = [f"{ov_signal_labels[k]}({ov_weights[k]:.2f})" for k in ov_enabled if ov_weights.get(k, 0) > 0]
+    if active:
+        st.caption(f"当前信号: {' + '.join(active)}（权重已归一化）")
+    else:
+        st.warning("请至少选择一个信号源")
+    # 提示配置已变更但未重新计算
+    new_signals = [s for s in ov_enabled if s not in last_computed]
+    removed_signals = [s for s in last_computed if s not in ov_enabled]
+    if new_signals or removed_signals:
+        st.info("信号配置已变更，点击「重新推荐」生效")
     if not rows:
         st.warning("股票池为空")
         return
@@ -292,15 +377,52 @@ def page_detail():
     time_range = st.sidebar.selectbox("回测时间范围", ["近3个月", "近6个月", "近1年", "近2年"], index=2)
     time_range_days = {"近3个月": 90, "近6个月": 180, "近1年": 365, "近2年": 730}[time_range]
 
+    # 信号源选择与权重
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**信号源配置**")
+    signal_labels = {"technical": "技术指标", "chanlun": "缠论", "kronos": "Kronos 模型"}
+    enabled_signals = []
+    custom_weights = {}
+    for key, label in signal_labels.items():
+        default_on = SIGNAL_WEIGHTS.get(key, 0) > 0
+        col_cb, col_w = st.sidebar.columns([1, 1])
+        on = col_cb.checkbox(label, value=default_on, key=f"sig_{key}")
+        if on:
+            enabled_signals.append(key)
+            default_w = SIGNAL_WEIGHTS.get(key, 0.0) or 0.3
+            w = col_w.number_input("权重", min_value=0.0, max_value=1.0,
+                                    value=default_w, step=0.05, key=f"w_{key}",
+                                    label_visibility="collapsed")
+            custom_weights[key] = w
+        else:
+            custom_weights[key] = 0.0
+    st.sidebar.markdown("---")
+
+    if not enabled_signals:
+        st.sidebar.warning("请至少选择一个信号源")
+
     if st.sidebar.button("开始分析", type="primary") or auto_analyze:
+        if not enabled_signals:
+            st.error("请先在侧边栏选择至少一个信号源")
+            return
+        kronos_progress = st.empty() if "kronos" in enabled_signals else None
+        def _detail_progress(cur, total, msg):
+            if kronos_progress:
+                if cur < total:
+                    kronos_progress.progress(cur / total, text=msg)
+                else:
+                    kronos_progress.empty()
+
         with st.spinner(f"正在分析 {name}({symbol})..."):
             df = get_stock_data(symbol, days=max(time_range_days + 60, 400), force_refresh=True, stock_type=stype)
 
             cutoff = df.index.max() - pd.Timedelta(days=time_range_days)
             df = df.loc[df.index >= cutoff]
 
-            signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
-            fusion_result = fuse_signals(signal_df)
+            signal_df = build_signals(df, symbol=symbol, sentiment_scores=None,
+                                       enabled_signals=enabled_signals,
+                                       progress_cb=_detail_progress if kronos_progress else None)
+            fusion_result = fuse_signals(signal_df, weights=custom_weights)
             decisions = fusion_result["decision"]
             result = run_backtest(symbol, signal_df, fusion_result, stock_type=stype)
             metrics = calc_metrics(result["net_values"], result["initial_capital"])

@@ -120,6 +120,7 @@ LIMIT_RULES = {
 SIGNAL_WEIGHTS = {
     "technical": 0.35,
     "chanlun": 0.35,
+    "kronos": 0.0,       # Kronos 模型（需安装 PyTorch，默认关闭）
     "sentiment": 0.30,
 }
 
