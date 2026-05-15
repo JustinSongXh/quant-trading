@@ -308,7 +308,7 @@ def generate_technical_signals(df: pd.DataFrame) -> pd.Series:
     1. 7个维度独立打分（MACD/RSI/KDJ/均线交叉/均线排列/布林带/SuperTrend）
     2. 加权求和得到原始分数
     3. 成交量确认：放量增强信号，缩量削弱信号
-    4. 归一化到 -1 ~ 1
+    4. clip 到 -1 ~ 1（绝对刻度，与窗口长度无关）
 
     Returns:
         Series: -1（强烈卖出）~ +1（强烈买入）
@@ -332,9 +332,4 @@ def generate_technical_signals(df: pd.DataFrame) -> pd.Series:
     vol_confirm = _signal_volume_confirm(df)
     raw = raw * vol_confirm
 
-    # 归一化到 -1 ~ 1
-    max_abs = raw.abs().max()
-    if max_abs > 0:
-        raw = raw / max_abs
-
-    return raw
+    return raw.clip(-1, 1)

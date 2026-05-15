@@ -116,12 +116,17 @@ LIMIT_RULES = {
     "index": 0.20,         # 指数无涨跌停，设大值兜底
 }
 
-# ========== 信号融合权重 ==========
-SIGNAL_WEIGHTS = {
-    "technical": 0.35,
-    "chanlun": 0.35,
-    "kronos": 0.0,       # Kronos 模型（需安装 PyTorch，默认关闭）
-    "sentiment": 0.30,
+# ========== 信号源配置（单选模式）==========
+# 可选: "technical" | "chanlun" | "kronos"
+DEFAULT_SIGNAL_SOURCE = "technical"
+# 触发买/卖的最小信号绝对值；|signal| < 阈值 视为观望
+SIGNAL_THRESHOLD = 0.3
+# 每个 source 计算一天信号所需的前置 K 线天数（buffer）
+# 例：技术指标当天信号 = f(K线[当天-60, 当天])；要展示 N 天信号需 fetch N + buffer 天
+SIGNAL_LOOKBACK = {
+    "technical": 60,    # MA60 充分稳定
+    "chanlun": 150,     # 覆盖 B3 中枢逻辑
+    "kronos": 400,      # 匹配 Kronos 模型自身上下文上限
 }
 
 # ========== 通知配置 ==========

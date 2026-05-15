@@ -15,7 +15,7 @@ print(f"数据: {len(df)} 行, {df.index[0].date()} ~ {df.index[-1].date()}")
 
 # 只用 Kronos
 signal_df = build_signals(df, symbol="000001", enabled_signals=["kronos"])
-fusion_result = fuse_signals(signal_df, weights={"kronos": 1.0})
+fusion_result = fuse_signals(signal_df, source="kronos")
 
 # 统计信号
 decisions = fusion_result["decision"]

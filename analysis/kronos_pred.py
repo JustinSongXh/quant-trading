@@ -12,6 +12,11 @@ logger = get_logger("kronos")
 _predictor = None
 _loaded = False
 
+# Kronos 信号刻度：预测未来 N 天累计涨跌达到该幅度时信号饱和到 ±1
+# 例如 0.08 意味着预测涨 8% → signal=1.0；预测涨 2.4% → signal=0.3
+# A 股 5 天 ±8% 大致对应"明显趋势/突破级别"，与技术指标/缠论的 1.0 语义对齐
+KRONOS_SATURATE_PCT = 0.08
+
 
 def _ensure_model():
     """懒加载 Kronos 模型，仅在首次调用时加载"""
@@ -56,12 +61,15 @@ def is_available() -> bool:
     return _ensure_model()
 
 
-def predict_future(df: pd.DataFrame, pred_days: int = 5) -> pd.DataFrame | None:
+def predict_future(df: pd.DataFrame, pred_days: int = 5,
+                    sample_count: int = 5, seed: int = 42) -> pd.DataFrame | None:
     """用 Kronos 预测未来 N 天 OHLCV
 
     Args:
         df: 日K线 DataFrame，需含 open/high/low/close/volume 列，DatetimeIndex
         pred_days: 预测天数
+        sample_count: 内部并行采样次数（自动平均），减少单次采样的噪声
+        seed: torch 随机种子，固定后相同输入永远得到相同预测
 
     Returns:
         预测结果 DataFrame（open/high/low/close/volume），失败返回 None
@@ -70,6 +78,10 @@ def predict_future(df: pd.DataFrame, pred_days: int = 5) -> pd.DataFrame | None:
         return None
 
     try:
+        import torch
+        # 固定 seed：相同 K 线输入 → 相同预测结果，可复现
+        torch.manual_seed(seed)
+
         lookback = min(400, len(df))
         recent = df.iloc[-lookback:].copy()
 
@@ -90,7 +102,7 @@ def predict_future(df: pd.DataFrame, pred_days: int = 5) -> pd.DataFrame | None:
             pred_len=pred_days,
             T=1.0,
             top_p=0.9,
-            sample_count=1,
+            sample_count=sample_count,
         )
         return pred_df
     except Exception as e:
@@ -106,7 +118,7 @@ def generate_kronos_signal(df: pd.DataFrame, pred_days: int = 5,
     策略逻辑：
     - 每隔 rebalance_every 个交易日跑一次 Kronos 预测
     - 用截止当天的历史数据预测未来 pred_days 天
-    - 计算预测累计涨跌幅，映射到 -1 ~ +1（±3% 为满分）
+    - 计算预测累计涨跌幅，映射到 -1 ~ +1（±KRONOS_SATURATE_PCT 为满分）
     - 两次预测之间前向填充信号
 
     Args:
@@ -146,7 +158,7 @@ def generate_kronos_signal(df: pd.DataFrame, pred_days: int = 5,
         last_close = hist["close"].iloc[-1]
         pred_close = pred_df["close"].iloc[-1]
         change_pct = (pred_close - last_close) / last_close
-        raw_signal = float(np.clip(change_pct / 0.03, -1.0, 1.0))
+        raw_signal = float(np.clip(change_pct / KRONOS_SATURATE_PCT, -1.0, 1.0))
 
         signal.iloc[idx] = raw_signal
 

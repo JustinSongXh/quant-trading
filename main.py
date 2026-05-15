@@ -1,6 +1,6 @@
 """入口：运行回测流程"""
 
-from config.settings import STOCK_POOL
+from config.settings import STOCK_POOL, DEFAULT_SIGNAL_SOURCE
 from data.fetcher import fetch_daily_kline
 from data.mock import fetch_mock_kline
 from data.cache import save_kline, load_kline
@@ -32,11 +32,13 @@ def run(symbols: list[str] | None = None):
                 logger.warning(f"  AKShare failed ({e}), using mock data")
                 df = fetch_mock_kline(symbol)
 
-        # 2. 构建信号（技术 + 缠论，情绪暂不接入）
-        signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
+        # 2. 构建信号（按默认信号源）
+        source = DEFAULT_SIGNAL_SOURCE
+        signal_df = build_signals(df, symbol=symbol, sentiment_scores=None,
+                                   enabled_signals=[source])
 
-        # 3. 融合决策
-        fusion_result = fuse_signals(signal_df)
+        # 3. 决策
+        fusion_result = fuse_signals(signal_df, source=source)
 
         # 4. 回测
         result = run_backtest(symbol, signal_df, fusion_result)

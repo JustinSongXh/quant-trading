@@ -53,8 +53,9 @@ def overview():
         market = stock.get("market", "A")
         try:
             df = _get_data(code)
-            signal_df = build_signals(df, symbol=code, sentiment_scores=None)
-            fusion_result = fuse_signals(signal_df)
+            signal_df = build_signals(df, symbol=code, sentiment_scores=None,
+                                       enabled_signals=["technical"])
+            fusion_result = fuse_signals(signal_df, source="technical")
 
             last = signal_df.iloc[-1]
             decision = int(fusion_result["decision"].iloc[-1])
@@ -98,8 +99,9 @@ def detail(code: str, days: int = 365):
         cutoff = df.index.max() - pd.Timedelta(days=days)
         df = df.loc[df.index >= cutoff]
 
-        signal_df = build_signals(df, symbol=code, sentiment_scores=None)
-        fusion_result = fuse_signals(signal_df)
+        signal_df = build_signals(df, symbol=code, sentiment_scores=None,
+                                   enabled_signals=["technical"])
+        fusion_result = fuse_signals(signal_df, source="technical")
         chan_result = chanlun_analyze(df, code)
 
         last = signal_df.iloc[-1]
