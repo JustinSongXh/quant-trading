@@ -3,7 +3,7 @@
 import pandas as pd
 import requests
 from config.settings import DEFAULT_LOOKBACK_DAYS
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from utils.logger import get_logger
 
 logger = get_logger("fetcher")
@@ -133,9 +133,12 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.Data
     else:
         df = _fetch_a_stock(symbol, start, end)
 
-    # 剔除今天未收盘的数据
-    today = pd.Timestamp(datetime.now().date())
-    df = df[df.index < today]
+    # 盘中剔除今天未收盘的数据；收盘后保留（数据已完整）
+    now = datetime.now()
+    today = pd.Timestamp(now.date())
+    close_time = time(16, 10) if is_hk_stock(symbol) else time(15, 5)
+    if now.weekday() < 5 and now.time() < close_time:
+        df = df[df.index < today]
 
     return df
 

@@ -91,7 +91,13 @@ def _scan_all_stocks(progress=None):
             last_strength = fusion_result["strength"].iloc[-1]
             rec_text, _ = get_recommendation(fusion_result["decision"].iloc[-1])
 
-            prev_close = round(float(last["close"]), 2)
+            # 昨收：如果最后一根K线是今天，取倒数第二根
+            from datetime import date as _date
+            if signal_df.index[-1].date() == _date.today() and len(signal_df) >= 2:
+                prev_close = round(float(signal_df.iloc[-2]["close"]), 2)
+                last_date = str(signal_df.index[-2].date())
+            else:
+                prev_close = round(float(last["close"]), 2)
             rt = realtime.get(code)
             cur_price = rt["price"] if rt else prev_close
             change_pct = rt["change_pct"] if rt else 0.0
@@ -164,7 +170,7 @@ def page_overview():
         # 昨收日期（从第一条数据取，所有股票同市场日期一样）
         sample = market_df.iloc[0] if len(market_df) > 0 else None
         prev_date = sample["日期"] if sample is not None else ""
-        prev_label = f"前收({prev_date[5:]})" if prev_date else "前收"
+        prev_label = f"昨收({prev_date[5:]})" if prev_date else "昨收"
 
         header_cols = st.columns([2.5, 1.2, 1.2, 1, 1.2, 1.2, 1, 1, 0.8])
         for col, title in zip(header_cols, ["股票", price_label, prev_label, "涨跌幅", "技术信号", "缠论信号", "推荐", "仓位", ""]):
