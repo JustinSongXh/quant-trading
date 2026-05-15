@@ -118,6 +118,11 @@ def generate_kronos_signal(df: pd.DataFrame, pred_days: int = 5,
     if not _ensure_model():
         return pd.Series(0.0, index=df.index)
 
+    # Kronos 最多用 400 天历史，超出的裁掉减少无用预测
+    max_len = 400
+    if len(df) > max_len:
+        df = df.iloc[-max_len:]
+
     signal = pd.Series(0.0, index=df.index)
     min_lookback = 60  # 至少需要 60 天历史数据才开始预测
 
