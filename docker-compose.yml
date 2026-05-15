@@ -18,14 +18,3 @@ services:
       - "8501:8501"
       - "8000:8000"
     restart: unless-stopped
-
-  # Cloudflare Tunnel
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: quant-tunnel
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-    depends_on:
-      - app
-    restart: unless-stopped
