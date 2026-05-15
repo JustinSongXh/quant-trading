@@ -24,6 +24,11 @@ class Broker:
         """根据板块获取对应的交易参数"""
         if board == "hk":
             return BACKTEST_HK
+        if board == "index":
+            # 指数：使用 A 股参数但 lot_size=1（按点位模拟交易）
+            cfg = dict(BACKTEST)
+            cfg["lot_size"] = 1
+            return cfg
         return BACKTEST
 
     def can_sell(self, symbol: str, current_date: str, board: str = "main_board") -> bool:
@@ -36,15 +41,15 @@ class Broker:
         return pos.buy_date < current_date
 
     def is_limit_up(self, prev_close: float, current_price: float, board: str) -> bool:
-        """是否涨停（港股无涨跌停）"""
-        if board == "hk":
+        """是否涨停（港股/指数无涨跌停）"""
+        if board in ("hk", "index"):
             return False
         limit = LIMIT_RULES.get(board, 0.10)
         return current_price >= prev_close * (1 + limit) * 0.999
 
     def is_limit_down(self, prev_close: float, current_price: float, board: str) -> bool:
-        """是否跌停（港股无涨跌停）"""
-        if board == "hk":
+        """是否跌停（港股/指数无涨跌停）"""
+        if board in ("hk", "index"):
             return False
         limit = LIMIT_RULES.get(board, 0.10)
         return current_price <= prev_close * (1 - limit) * 1.001
@@ -54,7 +59,9 @@ class Broker:
         cfg = self._get_config(board)
         lot_size = cfg.get("lot_size", 100)
 
-        shares = (shares // lot_size) * lot_size
+        # 按手取整；若不够一手但够至少1股，按实际股数买（回测允许碎股）
+        rounded = (shares // lot_size) * lot_size
+        shares = rounded if rounded > 0 else shares
         if shares <= 0:
             return
 

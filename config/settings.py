@@ -21,12 +21,22 @@ def load_stock_pool() -> list[dict]:
 # 兼容旧代码：纯代码列表
 STOCK_POOL = [s["code"] for s in load_stock_pool()]
 
-def get_stock_name(code: str) -> str:
+def get_stock_name(code: str, stock_type: str | None = None) -> str:
     """根据代码获取股票名称"""
     for s in load_stock_pool():
         if s["code"] == code:
+            if stock_type and s.get("type", "stock") != stock_type:
+                continue
             return s["name"]
     return code
+
+
+def get_stock_type(code: str) -> str:
+    """根据代码获取类型（stock/index），默认 stock"""
+    for s in load_stock_pool():
+        if s["code"] == code and s.get("type") == "index":
+            return "index"
+    return "stock"
 
 
 def save_stock_pool(stocks: list[dict]):
@@ -35,20 +45,23 @@ def save_stock_pool(stocks: list[dict]):
         json.dump(stocks, f, ensure_ascii=False, indent=4)
 
 
-def add_stock(code: str, name: str, market: str = "A"):
+def add_stock(code: str, name: str, market: str = "A", stock_type: str = "stock"):
     """添加股票到股票池"""
     pool = load_stock_pool()
-    if any(s["code"] == code for s in pool):
+    if any(s["code"] == code and s.get("type", "stock") == stock_type for s in pool):
         return False  # 已存在
-    pool.append({"code": code, "name": name, "market": market})
+    entry = {"code": code, "name": name, "market": market}
+    if stock_type == "index":
+        entry["type"] = "index"
+    pool.append(entry)
     save_stock_pool(pool)
     return True
 
 
-def remove_stock(code: str):
+def remove_stock(code: str, stock_type: str = "stock"):
     """从股票池删除股票"""
     pool = load_stock_pool()
-    pool = [s for s in pool if s["code"] != code]
+    pool = [s for s in pool if not (s["code"] == code and s.get("type", "stock") == stock_type)]
     save_stock_pool(pool)
 
 # ========== 数据配置 ==========
@@ -100,6 +113,7 @@ LIMIT_RULES = {
     "main_board": 0.10,    # 主板 ±10%
     "gem": 0.20,           # 创业板 ±20% (300xxx)
     "star": 0.20,          # 科创板 ±20% (688xxx)
+    "index": 0.20,         # 指数无涨跌停，设大值兜底
 }
 
 # ========== 信号融合权重 ==========

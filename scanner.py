@@ -21,16 +21,18 @@ def scan_all() -> list[dict]:
     for stock in stocks:
         code = stock["code"]
         name = stock["name"]
+        stype = stock.get("type", "stock")
+        cache_key = f"idx_{code}" if stype == "index" else code
         logger.info(f"Scanning {name}({code})...")
 
         try:
             # 获取数据（先尝试更新，失败则用缓存）
             try:
-                df = fetch_daily_kline(code)
-                save_kline(code, df)
+                df = fetch_daily_kline(code, stock_type=stype)
+                save_kline(cache_key, df)
             except Exception as e:
                 logger.warning(f"  fetch failed ({e}), trying cache...")
-                df = load_kline(code)
+                df = load_kline(cache_key)
                 if df is None:
                     logger.error(f"  {name}({code}): no data available, skip")
                     continue

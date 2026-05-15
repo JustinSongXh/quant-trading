@@ -14,6 +14,19 @@ def is_hk_stock(symbol: str) -> bool:
     return len(symbol) == 5 and symbol.isdigit()
 
 
+def is_index(symbol: str, stock_type: str | None = None) -> bool:
+    """判断是否为指数代码
+
+    优先使用 stock_type 字段判断，否则按代码推断。
+    """
+    if stock_type == "index":
+        return True
+    if stock_type == "stock":
+        return False
+    # 常见指数代码段（无 type 字段时的兜底）
+    return symbol in ("000001",) and False  # 有歧义，需要显式 type
+
+
 # ========== A 股数据采集 ==========
 
 def _symbol_to_baostock(symbol: str) -> str:
@@ -118,17 +131,54 @@ def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+# ========== 指数数据采集 ==========
+
+def _index_symbol_to_akshare(symbol: str) -> str:
+    """指数代码转 AKShare 格式（sh000001 / sz399006）"""
+    if symbol.startswith("0"):
+        return f"sh{symbol}"
+    elif symbol.startswith("3"):
+        return f"sz{symbol}"
+    return f"sh{symbol}"
+
+
+def _fetch_index(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """通过 AKShare 获取指数日K线"""
+    import akshare as ak
+    ak_symbol = _index_symbol_to_akshare(symbol)
+    start_fmt = f"{start[:4]}{start[4:6]}{start[6:]}"
+    end_fmt = f"{end[:4]}{end[4:6]}{end[6:]}"
+    df = ak.stock_zh_index_daily(symbol=ak_symbol)
+    df = df.rename(columns={"date": "date", "open": "open", "close": "close",
+                             "high": "high", "low": "low", "volume": "volume"})
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    # 按日期范围过滤
+    df = df.loc[start_fmt:end_fmt]
+    core_cols = ["open", "close", "high", "low", "volume"]
+    df = df[[c for c in core_cols if c in df.columns]]
+    logger.info(f"  {symbol}: fetched {len(df)} rows via AKShare index")
+    return df
+
+
 # ========== 统一入口 ==========
 
-def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
-    """获取个股日K线数据（前复权），自动识别 A 股/港股
+def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type: str | None = None) -> pd.DataFrame:
+    """获取日K线数据（前复权），自动识别 A 股/港股/指数
+
+    Args:
+        symbol: 股票/指数代码
+        days: 回溯天数
+        stock_type: "stock" / "index" / None（自动推断）
 
     注意：盘中获取的当天数据不完整，自动剔除今天的行，只保留已收盘的数据。
     """
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
-    if is_hk_stock(symbol):
+    if is_index(symbol, stock_type):
+        df = _fetch_index(symbol, start, end)
+    elif is_hk_stock(symbol):
         df = _fetch_hk_stock(symbol, start, end)
     else:
         df = _fetch_a_stock(symbol, start, end)
@@ -143,8 +193,11 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS) -> pd.Data
     return df
 
 
-def fetch_stock_info(symbol: str) -> dict:
+def fetch_stock_info(symbol: str, stock_type: str | None = None) -> dict:
     """获取个股基本信息（板块类型）"""
+    if is_index(symbol, stock_type):
+        return {"symbol": symbol, "board": "index", "market": "A", "type": "index"}
+
     if is_hk_stock(symbol):
         return {"symbol": symbol, "board": "hk", "market": "HK"}
 

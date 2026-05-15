@@ -9,20 +9,26 @@ logger = get_logger("realtime")
 _QT_URL = "https://qt.gtimg.cn/q="
 
 
-def _code_to_tencent(code: str) -> str:
+def _code_to_tencent(code: str, stock_type: str | None = None) -> str:
     """转为腾讯行情代码格式"""
     if is_hk_stock(code):
         return f"s_hk{code}"
+    if stock_type == "index":
+        # 指数：000xxx -> s_sh000xxx, 399xxx -> s_sz399xxx
+        if code.startswith("3"):
+            return f"s_sz{code}"
+        return f"s_sh{code}"
     if code.startswith(("6", "9")):
         return f"s_sh{code}"
     return f"s_sz{code}"
 
 
-def get_realtime_quotes(codes: list[str]) -> dict[str, dict]:
+def get_realtime_quotes(codes: list[str], type_map: dict[str, str] | None = None) -> dict[str, dict]:
     """批量获取实时行情
 
     Args:
         codes: 股票代码列表，如 ["600519", "00700"]
+        type_map: {code: type} 映射，用于区分同代码的指数和个股
 
     Returns:
         {code: {"name", "price", "change", "change_pct", "volume"}}
@@ -30,7 +36,8 @@ def get_realtime_quotes(codes: list[str]) -> dict[str, dict]:
     if not codes:
         return {}
 
-    tencent_codes = [_code_to_tencent(c) for c in codes]
+    type_map = type_map or {}
+    tencent_codes = [_code_to_tencent(c, type_map.get(c)) for c in codes]
     query = ",".join(tencent_codes)
 
     try:

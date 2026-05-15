@@ -19,7 +19,7 @@ def _calc_position_pct(strength: float) -> float:
     return POSITION_SIZING[-1]["position_pct"]
 
 
-def run_backtest(symbol: str, signal_df: pd.DataFrame, fusion_result: pd.DataFrame) -> dict:
+def run_backtest(symbol: str, signal_df: pd.DataFrame, fusion_result: pd.DataFrame, stock_type: str | None = None) -> dict:
     """运行单只股票回测
 
     Args:
@@ -31,7 +31,7 @@ def run_backtest(symbol: str, signal_df: pd.DataFrame, fusion_result: pd.DataFra
         回测结果 dict，含净值曲线和交易记录
     """
     broker = Broker()
-    stock_info = fetch_stock_info(symbol)
+    stock_info = fetch_stock_info(symbol, stock_type=stock_type)
     board = stock_info["board"]
     cfg = BACKTEST_HK if board == "hk" else BACKTEST
 

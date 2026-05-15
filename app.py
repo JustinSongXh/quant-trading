@@ -5,8 +5,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
-from config.settings import load_stock_pool, get_stock_name, add_stock, remove_stock
-from data.fetcher import fetch_daily_kline, is_hk_stock
+from config.settings import load_stock_pool, get_stock_name, get_stock_type, add_stock, remove_stock
+from data.fetcher import fetch_daily_kline, is_hk_stock, is_index
 from data.stock_list import search_stocks, get_all_stocks
 from data.realtime import get_realtime_quotes
 from data.mock import fetch_mock_kline
@@ -40,18 +40,20 @@ st.markdown("""
 
 # ========== 工具函数 ==========
 
-def get_stock_data(code, days=365, force_refresh=False):
+def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
     """获取股票数据，优先用新鲜缓存，过期则刷新"""
-    if not force_refresh and is_cache_fresh(code):
-        df = load_kline(code)
+    # 指数用带 type 前缀的 cache key，避免和同代码个股冲突
+    cache_key = f"idx_{code}" if stock_type == "index" else code
+    if not force_refresh and is_cache_fresh(cache_key):
+        df = load_kline(cache_key)
         if df is not None and len(df) > 0:
             return df
     try:
-        df = fetch_daily_kline(code, days=days)
-        save_kline(code, df)
+        df = fetch_daily_kline(code, days=days, stock_type=stock_type)
+        save_kline(cache_key, df)
         return df
     except Exception:
-        df = load_kline(code)
+        df = load_kline(cache_key)
         if df is not None:
             return df
         return fetch_mock_kline(code)
@@ -72,7 +74,8 @@ def _scan_all_stocks(progress=None):
     """扫描全部股票，返回结果列表"""
     stocks = load_stock_pool()
     all_codes = [s["code"] for s in stocks]
-    realtime = get_realtime_quotes(all_codes)
+    type_map = {s["code"]: s.get("type", "stock") for s in stocks}
+    realtime = get_realtime_quotes(all_codes, type_map=type_map)
     total = len(stocks)
 
     rows = []
@@ -81,8 +84,9 @@ def _scan_all_stocks(progress=None):
             progress.progress((i + 1) / total, text=f"扫描 {stock['name']}({stock['code']})...")
         code, name = stock["code"], stock["name"]
         market = stock.get("market", "A")
+        stype = stock.get("type", "stock")
         try:
-            df = get_stock_data(code, days=400)
+            df = get_stock_data(code, days=400, stock_type=stype)
             signal_df = build_signals(df, symbol=code, sentiment_scores=None)
             fusion_result = fuse_signals(signal_df)
 
@@ -110,23 +114,25 @@ def _scan_all_stocks(progress=None):
                         pos_label = tier["label"]
                         break
 
+            market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
             rows.append({
-                "市场": "港股" if market == "HK" else "A股",
+                "市场": market_label,
                 "股票": f"{name}({code})",
                 "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
                 "技术信号": round(last.get("technical_signal", 0), 3),
                 "缠论信号": round(last.get("chanlun_signal", 0), 3),
                 "综合推荐": rec_text, "仓位建议": pos_label,
-                "日期": last_date, "_code": code,
+                "日期": last_date, "_code": code, "_type": stype,
             })
         except Exception:
+            market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
             rows.append({
-                "市场": "港股" if market == "HK" else "A股",
+                "市场": market_label,
                 "股票": f"{name}({code})",
                 "昨收": "-", "现价": "-", "涨跌幅": "-",
                 "技术信号": "-", "缠论信号": "-",
                 "综合推荐": "数据异常", "仓位建议": "",
-                "日期": "-", "_code": code,
+                "日期": "-", "_code": code, "_type": stype,
             })
     return rows
 
@@ -156,7 +162,7 @@ def page_overview():
     result_df = pd.DataFrame(rows)
 
     # 分市场显示，每行带「查看详情」按钮
-    for market_label, market_key in [("A股", "A股"), ("港股", "港股")]:
+    for market_label, market_key in [("指数", "指数"), ("A股", "A股"), ("港股", "港股")]:
         market_df = result_df[result_df["市场"] == market_key]
         if market_df.empty:
             continue
@@ -221,9 +227,10 @@ def page_overview():
                 cols[7].write("")
 
             # 查看详情按钮
-            if cols[8].button("详情", key=f"btn_{row['_code']}"):
+            if cols[8].button("详情", key=f"btn_{row['_code']}_{row.get('_type', 'stock')}"):
                 st.session_state["page"] = "单股票分析"
                 st.session_state["selected_code"] = row["_code"]
+                st.session_state["selected_type"] = row.get("_type", "stock")
                 st.session_state["auto_analyze"] = True
                 st.rerun()
 
@@ -235,27 +242,36 @@ def page_detail():
 
     # 侧边栏：按市场分组选股
     stocks = load_stock_pool()
-    a_stocks = [s for s in stocks if s.get("market", "A") == "A"]
+    idx_stocks = [s for s in stocks if s.get("type") == "index"]
+    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") != "index"]
     hk_stocks = [s for s in stocks if s.get("market") == "HK"]
 
     # 从 session_state 读取跳转过来的股票
     preselected_code = st.session_state.get("selected_code", None)
+    preselected_type = st.session_state.get("selected_type", None)
     auto_analyze = st.session_state.pop("auto_analyze", False)
-
-    # 按市场分组
-    all_options = {f"{s['name']}({s['code']})": s['code'] for s in stocks}
-    a_options = {f"{s['name']}({s['code']})": s['code'] for s in a_stocks}
-    hk_options = {f"{s['name']}({s['code']})": s['code'] for s in hk_stocks}
 
     # 判断预选股票所在市场
     default_market = "A股"
-    if preselected_code and is_hk_stock(preselected_code):
+    if preselected_type == "index":
+        default_market = "指数"
+    elif preselected_code and is_hk_stock(preselected_code):
         default_market = "港股"
 
-    market_tab = st.sidebar.radio("市场", ["A股", "港股"], horizontal=True,
-                                   index=0 if default_market == "A股" else 1)
-    pool = a_stocks if market_tab == "A股" else hk_stocks
+    market_tabs = ["A股", "港股"]
+    if idx_stocks:
+        market_tabs = ["指数"] + market_tabs
+    market_tab = st.sidebar.radio("市场", market_tabs, horizontal=True,
+                                   index=market_tabs.index(default_market) if default_market in market_tabs else 0)
+    if market_tab == "指数":
+        pool = idx_stocks
+    elif market_tab == "港股":
+        pool = hk_stocks
+    else:
+        pool = a_stocks
     stock_options = {f"{s['name']}({s['code']})": s['code'] for s in pool}
+    # 建立 label -> stock 的映射，用于获取 type
+    stock_by_label = {f"{s['name']}({s['code']})": s for s in pool}
 
     if not stock_options:
         st.sidebar.warning(f"{market_tab}股票池为空")
@@ -270,14 +286,15 @@ def page_detail():
 
     selected = st.sidebar.selectbox("选择股票", list(stock_options.keys()), index=default_idx)
     symbol = stock_options[selected]
-    name = get_stock_name(symbol)
+    stype = stock_by_label.get(selected, {}).get("type", "stock")
+    name = get_stock_name(symbol, stock_type=stype)
 
     time_range = st.sidebar.selectbox("回测时间范围", ["近3个月", "近6个月", "近1年", "近2年"], index=2)
     time_range_days = {"近3个月": 90, "近6个月": 180, "近1年": 365, "近2年": 730}[time_range]
 
     if st.sidebar.button("开始分析", type="primary") or auto_analyze:
         with st.spinner(f"正在分析 {name}({symbol})..."):
-            df = get_stock_data(symbol, days=max(time_range_days + 60, 400), force_refresh=True)
+            df = get_stock_data(symbol, days=max(time_range_days + 60, 400), force_refresh=True, stock_type=stype)
 
             cutoff = df.index.max() - pd.Timedelta(days=time_range_days)
             df = df.loc[df.index >= cutoff]
@@ -285,7 +302,7 @@ def page_detail():
             signal_df = build_signals(df, symbol=symbol, sentiment_scores=None)
             fusion_result = fuse_signals(signal_df)
             decisions = fusion_result["decision"]
-            result = run_backtest(symbol, signal_df, fusion_result)
+            result = run_backtest(symbol, signal_df, fusion_result, stock_type=stype)
             metrics = calc_metrics(result["net_values"], result["initial_capital"])
             trades = result["trade_log"]
             chan_result = chanlun_analyze(df, symbol)
@@ -505,31 +522,34 @@ def page_manage():
     with col_left:
         st.markdown("### 当前股票池")
 
-        a_pool = [s for s in pool if s.get("market", "A") == "A"]
+        idx_pool = [s for s in pool if s.get("type") == "index"]
+        a_pool = [s for s in pool if s.get("market", "A") == "A" and s.get("type") != "index"]
         hk_pool = [s for s in pool if s.get("market") == "HK"]
 
-        for label, sub_pool in [("A股", a_pool), ("港股", hk_pool)]:
+        for label, sub_pool in [("指数", idx_pool), ("A股", a_pool), ("港股", hk_pool)]:
             if not sub_pool:
                 continue
             st.markdown(f"**{label}**（{len(sub_pool)} 只）")
             for s in sub_pool:
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"{s['name']}（{s['code']}）")
-                if c2.button("移除", key=f"del_{s['code']}"):
-                    remove_stock(s["code"])
+                stype = s.get("type", "stock")
+                if c2.button("移除", key=f"del_{s['code']}_{stype}"):
+                    remove_stock(s["code"], stock_type=stype)
                     st.rerun()
 
         # 手动输入添加
         st.markdown("---")
         st.markdown("**手动添加**")
-        add_cols = st.columns([2, 2, 1, 1])
+        add_cols = st.columns([2, 2, 1, 1, 1])
         new_code = add_cols[0].text_input("代码", placeholder="600519 或 00700", key="manual_code")
         new_name = add_cols[1].text_input("名称", placeholder="贵州茅台", key="manual_name")
         new_market = add_cols[2].selectbox("市场", ["A", "HK"], key="manual_market")
-        add_cols[3].write("")  # 占位对齐
-        if add_cols[3].button("添加", key="manual_add"):
+        new_type = add_cols[3].selectbox("类型", ["stock", "index"], key="manual_type",
+                                          format_func=lambda x: "个股" if x == "stock" else "指数")
+        if add_cols[4].button("添加", key="manual_add"):
             if new_code and new_name:
-                if add_stock(new_code.strip(), new_name.strip(), new_market):
+                if add_stock(new_code.strip(), new_name.strip(), new_market, stock_type=new_type):
                     st.rerun()
                 else:
                     st.warning(f"{new_code} 已在股票池中")
