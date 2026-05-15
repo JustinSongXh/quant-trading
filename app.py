@@ -418,12 +418,14 @@ def page_detail():
         with st.spinner(f"正在分析 {name}({symbol})..."):
             df = get_stock_data(symbol, days=max(time_range_days + 60, 400), force_refresh=True, stock_type=stype)
 
-            cutoff = df.index.max() - pd.Timedelta(days=time_range_days)
-            df = df.loc[df.index >= cutoff]
-
+            # 先用完整数据算信号，再按时间范围裁剪（保证信号一致性）
             signal_df = build_signals(df, symbol=symbol, sentiment_scores=None,
                                        enabled_signals=enabled_signals,
                                        progress_cb=_detail_progress if kronos_progress else None)
+
+            cutoff = signal_df.index.max() - pd.Timedelta(days=time_range_days)
+            signal_df = signal_df.loc[signal_df.index >= cutoff]
+
             fusion_result = fuse_signals(signal_df, weights=custom_weights)
             decisions = fusion_result["decision"]
             result = run_backtest(symbol, signal_df, fusion_result, stock_type=stype)
