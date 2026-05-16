@@ -125,8 +125,10 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
                 prev_close = round(float(last["close"]), 2)
                 last_date = str(signal_df.index[-1].date())
             rt = realtime.get(code)
-            cur_price = rt["price"] if rt else prev_close
-            change_pct = rt["change_pct"] if rt else 0.0
+            cur_price = round(float(rt["price"]), 2) if rt else prev_close
+            # 直接用现价/昨收算涨跌幅，避免非交易日 realtime 返回上一交易日快照导致
+            # "现价==昨收 但涨跌幅≠0" 的不一致
+            change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
             market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
 
             meta_cache[cache_id] = {
