@@ -23,21 +23,21 @@ def _code_to_tencent(code: str, stock_type: str | None = None) -> str:
     return f"s_sz{code}"
 
 
-def get_realtime_quotes(codes: list[str], type_map: dict[str, str] | None = None) -> dict[str, dict]:
+def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, str], dict]:
     """批量获取实时行情
 
     Args:
-        codes: 股票代码列表，如 ["600519", "00700"]
-        type_map: {code: type} 映射，用于区分同代码的指数和个股
+        items: [(code, stock_type)] 列表，stock_type 为 "stock"/"index"/None。
+               同一 code 不同 type 可并存（如 000001 既是平安银行也是上证指数）。
 
     Returns:
-        {code: {"name", "price", "change", "change_pct", "volume"}}
+        {(code, type): {"name", "price", "change", "change_pct"}}，type 缺省为 "stock"。
     """
-    if not codes:
+    if not items:
         return {}
 
-    type_map = type_map or {}
-    tencent_codes = [_code_to_tencent(c, type_map.get(c)) for c in codes]
+    norm = [(code, stype or "stock") for code, stype in items]
+    tencent_codes = [_code_to_tencent(c, t) for c, t in norm]
     query = ",".join(tencent_codes)
 
     try:
@@ -49,7 +49,7 @@ def get_realtime_quotes(codes: list[str], type_map: dict[str, str] | None = None
         return {}
 
     results = {}
-    for code, tc in zip(codes, tencent_codes):
+    for (code, stype), tc in zip(norm, tencent_codes):
         key = f"v_{tc}"
         for line in text.split("\n"):
             if key in line:
@@ -57,7 +57,7 @@ def get_realtime_quotes(codes: list[str], type_map: dict[str, str] | None = None
                 parts = line.split("~")
                 if len(parts) >= 6:
                     try:
-                        results[code] = {
+                        results[(code, stype)] = {
                             "name": parts[1],
                             "price": float(parts[3]),
                             "change": float(parts[4]),

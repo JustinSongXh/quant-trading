@@ -81,9 +81,8 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
                       kronos_progress=None, force_refresh_data=False):
     """扫描股票池，计算指定 source 的信号；signal_df 按 source 缓存到 session_state"""
     stocks = load_stock_pool()
-    all_codes = [s["code"] for s in stocks]
-    type_map = {s["code"]: s.get("type", "stock") for s in stocks}
-    realtime = get_realtime_quotes(all_codes, type_map=type_map)
+    quote_items = [(s["code"], s.get("type", "stock")) for s in stocks]
+    realtime = get_realtime_quotes(quote_items)
     total = len(stocks)
 
     use_kronos = source == "kronos"
@@ -124,7 +123,7 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
             else:
                 prev_close = round(float(last["close"]), 2)
                 last_date = str(signal_df.index[-1].date())
-            rt = realtime.get(code)
+            rt = realtime.get((code, stype))
             cur_price = round(float(rt["price"]), 2) if rt else prev_close
             # 直接用现价/昨收算涨跌幅，避免非交易日 realtime 返回上一交易日快照导致
             # "现价==昨收 但涨跌幅≠0" 的不一致
