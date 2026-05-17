@@ -27,6 +27,9 @@ data/cache/*.duckdb
 .env
 .env.local
 
+# Local deploy config (machine-specific resource limits etc.)
+docker-compose.yml
+
 # OS
 .DS_Store
 Thumbs.db
