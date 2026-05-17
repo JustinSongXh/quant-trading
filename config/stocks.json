@@ -1,22 +1,107 @@
 [
-    {"code": "600519", "name": "贵州茅台", "market": "A"},
-    {"code": "000858", "name": "五粮液", "market": "A"},
-    {"code": "300750", "name": "宁德时代", "market": "A"},
-    {"code": "601318", "name": "中国平安", "market": "A"},
-    {"code": "000001", "name": "平安银行", "market": "A"},
-    {"code": "600036", "name": "招商银行", "market": "A"},
-    {"code": "000333", "name": "美的集团", "market": "A"},
-    {"code": "002594", "name": "比亚迪", "market": "A"},
-    {"code": "600900", "name": "长江电力", "market": "A"},
-    {"code": "688981", "name": "中芯国际", "market": "A"},
-    {"code": "00700", "name": "腾讯控股", "market": "HK"},
-    {"code": "09988", "name": "阿里巴巴", "market": "HK"},
-    {"code": "03690", "name": "美团", "market": "HK"},
-    {"code": "01810", "name": "小米集团", "market": "HK"},
-    {"code": "09888", "name": "百度集团", "market": "HK"},
-    {"code": "000001", "name": "上证指数", "market": "A", "type": "index"},
-    {"code": "399001", "name": "深证成指", "market": "A", "type": "index"},
-    {"code": "399006", "name": "创业板指", "market": "A", "type": "index"},
-    {"code": "000300", "name": "沪深300", "market": "A", "type": "index"},
-    {"code": "000905", "name": "中证500", "market": "A", "type": "index"}
+    {
+        "code": "300750",
+        "name": "宁德时代",
+        "market": "A"
+    },
+    {
+        "code": "002594",
+        "name": "比亚迪",
+        "market": "A"
+    },
+    {
+        "code": "600900",
+        "name": "长江电力",
+        "market": "A"
+    },
+    {
+        "code": "688981",
+        "name": "中芯国际",
+        "market": "A"
+    },
+    {
+        "code": "00700",
+        "name": "腾讯控股",
+        "market": "HK"
+    },
+    {
+        "code": "09988",
+        "name": "阿里巴巴",
+        "market": "HK"
+    },
+    {
+        "code": "03690",
+        "name": "美团",
+        "market": "HK"
+    },
+    {
+        "code": "01810",
+        "name": "小米集团",
+        "market": "HK"
+    },
+    {
+        "code": "09888",
+        "name": "百度集团",
+        "market": "HK"
+    },
+    {
+        "code": "000001",
+        "name": "上证指数",
+        "market": "A",
+        "type": "index"
+    },
+    {
+        "code": "399001",
+        "name": "深证成指",
+        "market": "A",
+        "type": "index"
+    },
+    {
+        "code": "399006",
+        "name": "创业板指",
+        "market": "A",
+        "type": "index"
+    },
+    {
+        "code": "000300",
+        "name": "沪深300",
+        "market": "A",
+        "type": "index"
+    },
+    {
+        "code": "000905",
+        "name": "中证500",
+        "market": "A",
+        "type": "index"
+    },
+    {
+        "code": "600312",
+        "name": "平高电气",
+        "market": "A"
+    },
+    {
+        "code": "002475",
+        "name": "立讯精密",
+        "market": "A"
+    },
+    {
+        "code": "601138",
+        "name": "工业富联",
+        "market": "A"
+    },
+    {
+        "code": "603986",
+        "name": "兆易创新",
+        "market": "A"
+    },
+    {
+        "code": "688525",
+        "name": "佰维存储",
+        "market": "A"
+    },
+    {
+        "code": "002176",
+        "name": "江特电机",
+        "market": "A"
+    }
 ]
