@@ -55,19 +55,28 @@ def _fetch_via_akshare(symbol: str, start: str, end: str) -> pd.DataFrame:
 def _fetch_via_baostock(symbol: str, start: str, end: str) -> pd.DataFrame:
     import baostock as bs
     bs.login()
-    bs_symbol = _symbol_to_baostock(symbol)
-    start_fmt = f"{start[:4]}-{start[4:6]}-{start[6:]}"
-    end_fmt = f"{end[:4]}-{end[4:6]}-{end[6:]}"
-    rs = bs.query_history_k_data_plus(
-        bs_symbol,
-        "date,open,high,low,close,volume",
-        start_date=start_fmt, end_date=end_fmt,
-        frequency="d", adjustflag="2",
-    )
-    rows = []
-    while (rs.error_code == "0") and rs.next():
-        rows.append(rs.get_row_data())
-    bs.logout()
+    try:
+        bs_symbol = _symbol_to_baostock(symbol)
+        start_fmt = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+        end_fmt = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+        rs = bs.query_history_k_data_plus(
+            bs_symbol,
+            "date,open,high,low,close,volume",
+            start_date=start_fmt, end_date=end_fmt,
+            frequency="d", adjustflag="2",
+        )
+        rows = []
+        while (rs.error_code == "0") and rs.next():
+            rows.append(rs.get_row_data())
+        # baostock 偶发 Broken pipe 会让 rs.next() 提前返回 False，
+        # 此时即使 error_code 仍为 "0" 也只能拿到空结果——把"无数据"当失败抛出，
+        # 让上层走缓存或友好提示路径，而不是把空 df 默默喂给下游分析。
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock query error {rs.error_code}: {rs.error_msg}")
+        if not rows:
+            raise RuntimeError(f"baostock returned no rows for {bs_symbol}")
+    finally:
+        bs.logout()
 
     df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
     for col in ["open", "high", "low", "close", "volume"]:

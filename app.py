@@ -12,7 +12,6 @@ from config.settings import (
 from data.fetcher import fetch_daily_kline, is_hk_stock, is_index
 from data.stock_list import search_stocks, get_all_stocks
 from data.realtime import get_realtime_quotes
-from data.mock import fetch_mock_kline
 from data.cache import save_kline, load_kline, is_cache_fresh, is_during_trading
 from strategy.signals import build_signals
 from strategy.fusion import fuse_signals, SOURCE_COLUMNS
@@ -44,7 +43,10 @@ st.markdown("""
 # ========== 工具函数 ==========
 
 def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
-    """获取股票数据，优先用新鲜缓存，过期或缓存天数不够则刷新"""
+    """获取股票数据，优先用新鲜缓存，过期或缓存天数不够则刷新。
+
+    数据源全失败且无任何缓存时返回空 DataFrame，由调用方决定如何提示用户。
+    """
     # 指数用带 type 前缀的 cache key，避免和同代码个股冲突
     cache_key = f"idx_{code}" if stock_type == "index" else code
     if not force_refresh and is_cache_fresh(cache_key):
@@ -54,13 +56,16 @@ def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
             return df
     try:
         df = fetch_daily_kline(code, days=days, stock_type=stock_type)
-        save_kline(cache_key, df)
-        return df
-    except Exception:
-        df = load_kline(cache_key)
-        if df is not None:
+        if df is not None and not df.empty:
+            save_kline(cache_key, df)
             return df
-        return fetch_mock_kline(code)
+    except Exception:
+        pass
+    # fetch 失败或返回空：用任意已有缓存兜底（哪怕已过期）
+    df = load_kline(cache_key)
+    if df is not None and not df.empty:
+        return df
+    return pd.DataFrame()
 
 
 def get_recommendation(decision):
@@ -410,6 +415,13 @@ def page_detail():
             buffer_days = SIGNAL_LOOKBACK[source]
             df = get_stock_data(symbol, days=time_range_days + buffer_days,
                                  force_refresh=button_pressed, stock_type=stype)
+
+            if df is None or df.empty:
+                st.error(f"无法获取 {name}({symbol}) 的行情数据：数据源临时不可用或该代码暂无历史K线。"
+                         "可点击「刷新」重试，或确认代码是否正确。")
+                st.session_state.pop("detail_last_key", None)
+                st.session_state.pop("detail_last_result", None)
+                st.stop()
 
             # 全量信号 df（含 buffer，用于图表/缠论/当前信号展示）
             signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,

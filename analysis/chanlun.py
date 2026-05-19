@@ -37,6 +37,11 @@ def analyze(df: pd.DataFrame, symbol: str = "stock") -> dict:
         - buy_points: 买点列表
         - sell_points: 卖点列表
     """
+    # CZSC(bars) 在空 bars 上会 panic（pyo3 PanicException，且继承自 BaseException
+    # 无法被 except Exception 接住），提前返回空结果让上游正常处理"无数据"
+    if df is None or df.empty:
+        return {"czsc": None, "bi_list": [], "zs_list": [],
+                "buy_points": [], "sell_points": []}
     bars = kline_to_bars(df, symbol)
     c = CZSC(bars)
 
