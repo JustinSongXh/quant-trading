@@ -4,7 +4,7 @@ import os
 import json
 import duckdb
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime, time, date, timedelta
 from config.settings import CACHE_DB_PATH
 from data.fetcher import is_hk_stock
 
@@ -24,54 +24,62 @@ def _meta_path(symbol: str) -> str:
     return os.path.join(_META_DIR, f"{symbol}.json")
 
 
-def _save_meta(symbol: str):
-    """记录缓存写入时间"""
+def _save_meta(symbol: str, last_bar_date: str | None):
+    """记录缓存写入时间与缓存中最新一根 K 线的日期"""
     _ensure_dir()
+    payload = {"updated_at": datetime.now().isoformat()}
+    if last_bar_date:
+        payload["last_bar_date"] = last_bar_date
     with open(_meta_path(symbol), "w") as f:
-        json.dump({"updated_at": datetime.now().isoformat()}, f)
+        json.dump(payload, f)
 
 
-def _load_meta(symbol: str) -> datetime | None:
-    """读取缓存写入时间"""
+def _load_meta(symbol: str) -> dict | None:
+    """读取 meta（updated_at + last_bar_date）"""
     path = _meta_path(symbol)
     if not os.path.exists(path):
         return None
     with open(path, "r") as f:
-        data = json.load(f)
-    return datetime.fromisoformat(data["updated_at"])
+        return json.load(f)
+
+
+def _prev_trading_day(d: date) -> date:
+    """上一个交易日（仅按周末判断，不含节假日）"""
+    d = d - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _expected_last_bar_date(symbol: str) -> date:
+    """缓存里最新的 K 线日期满足 >= 此值才算够新
+
+    - 今天是交易日且已收盘：期望今天
+    - 今天是交易日但盘中：期望上一交易日（盘中不强制刷新）
+    - 今天非交易日：期望上一交易日
+    """
+    now = datetime.now()
+    close_time = _CLOSE_TIME_HK if is_hk_stock(symbol) else _CLOSE_TIME_A
+    today = now.date()
+    if today.weekday() < 5 and now.time() >= close_time:
+        return today
+    return _prev_trading_day(today)
 
 
 def is_cache_fresh(symbol: str) -> bool:
-    """判断缓存是否为最新收盘数据
+    """判断缓存是否覆盖到最新应有的交易日
 
-    规则：
-    - A 股：当天 15:00 后写入的才有效
-    - 港股：当天 16:00 后写入的才有效
-    - 非交易日：上一个交易日收盘后的缓存有效
+    依据缓存数据本身的最后一根 K 线日期判断，而不是 meta 的写入时间——
+    避免在 T-1 盘中（彼时 T-1 当日 K 线还没出来）抓到的旧数据被一直当成"新鲜"。
     """
-    updated_at = _load_meta(symbol)
-    if updated_at is None:
+    meta = _load_meta(symbol)
+    if not meta or "last_bar_date" not in meta:
         return False
-
-    now = datetime.now()
-    close_time = _CLOSE_TIME_HK if is_hk_stock(symbol) else _CLOSE_TIME_A
-
-    # 今天是否交易日（简单判断：周一到周五）
-    today_is_trading_day = now.weekday() < 5
-
-    if today_is_trading_day:
-        if now.time() >= close_time:
-            # 已收盘：缓存需要是今天收盘后写入的
-            today_close = datetime.combine(now.date(), close_time)
-            return updated_at >= today_close
-        else:
-            # 盘中：上一个交易日收盘后的缓存就够了（盘中不强制刷新）
-            # 但如果缓存是今天盘中写入的，标记为不新鲜（下次会刷新）
-            return updated_at.date() < now.date() or updated_at.time() >= close_time
-    else:
-        # 周末/节假日：只要不是太久以前的就行（3天内）
-        age = now - updated_at
-        return age.total_seconds() < 3 * 24 * 3600
+    try:
+        last_bar = date.fromisoformat(meta["last_bar_date"][:10])
+    except ValueError:
+        return False
+    return last_bar >= _expected_last_bar_date(symbol)
 
 
 def is_during_trading(symbol: str) -> bool:
@@ -92,13 +100,15 @@ def save_kline(symbol: str, df: pd.DataFrame):
         save_df = save_df.reset_index()
     save_df["date"] = save_df["date"].astype(str)
 
+    last_bar_date = max(save_df["date"])[:10] if not save_df.empty else None
+
     conn = duckdb.connect(CACHE_DB_PATH)
     table_name = f"kline_{symbol}"
     conn.execute(f"DROP TABLE IF EXISTS {table_name}")
     conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM save_df")
     conn.close()
 
-    _save_meta(symbol)
+    _save_meta(symbol, last_bar_date)
 
 
 def load_kline(symbol: str) -> pd.DataFrame | None:
