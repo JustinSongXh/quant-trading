@@ -30,6 +30,9 @@ data/cache/*.duckdb
 # Local deploy config (machine-specific resource limits etc.)
 docker-compose.yml
 
+# Local stock pool (user-specific watchlist)
+config/stocks.json
+
 # OS
 .DS_Store
 Thumbs.db
