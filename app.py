@@ -213,15 +213,21 @@ def page_overview():
     st.sidebar.markdown("---")
     need_refresh = st.sidebar.button("刷新数据", type="primary")
 
+    # 股票池指纹：管理页加/删股票后回到总览，靠它触发自动重扫
+    pool_fp = tuple(sorted((s["code"], s.get("type", "stock")) for s in load_stock_pool()))
+    pool_changed = st.session_state.get("overview_pool_fp") != pool_fp
+
     # radio 切换：当前 source 没缓存就重算（实际是"选了就重新计算"）
     sig_cache = st.session_state.get("overview_signals", {}).get(source, {})
-    need_scan = need_refresh or not sig_cache or "overview_meta" not in st.session_state
+    need_scan = (need_refresh or pool_changed or not sig_cache
+                 or "overview_meta" not in st.session_state)
 
     if need_scan:
         progress = st.progress(0, text="正在扫描...")
         kronos_bar = st.empty() if source == "kronos" else None
         _scan_all_stocks(progress, source=source, kronos_progress=kronos_bar,
                           force_refresh_data=need_refresh)
+        st.session_state["overview_pool_fp"] = pool_fp
         progress.empty()
         if kronos_bar:
             kronos_bar.empty()
