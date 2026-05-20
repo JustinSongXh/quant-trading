@@ -152,8 +152,10 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
     st.session_state["overview_meta"] = meta_cache
 
 
-def _build_overview_rows(source):
+def _build_overview_rows(source, buy_threshold=SIGNAL_THRESHOLD, sell_threshold=None):
     """读取指定 source 的信号缓存，按阈值生成展示行"""
+    if sell_threshold is None:
+        sell_threshold = -buy_threshold
     sig_cache = st.session_state.get("overview_signals", {}).get(source, {})
     meta_cache = st.session_state.get("overview_meta", {})
     src_col = SOURCE_COLUMNS[source]
@@ -165,7 +167,9 @@ def _build_overview_rows(source):
             rows.append({**meta, "信号值": "-", "推荐": "数据异常", "仓位建议": ""})
             continue
 
-        fusion_result = fuse_signals(signal_df, source=source)
+        fusion_result = fuse_signals(signal_df, source=source,
+                                      buy_threshold=buy_threshold,
+                                      sell_threshold=sell_threshold)
         last = signal_df.iloc[-1]
         last_strength = fusion_result["strength"].iloc[-1]
         rec_text, _ = get_recommendation(fusion_result["decision"].iloc[-1])
@@ -392,12 +396,44 @@ def page_detail():
         key="dt_source",
         label_visibility="collapsed",
     )
+
+    # 信号阈值（"待生效"语义：改完点刷新才应用）
+    # dt_buy_th / dt_sell_th 是当前生效值；dt_*_pending 是输入框 widget 值
+    buy_th = st.session_state.setdefault("dt_buy_th", SIGNAL_THRESHOLD)
+    sell_th = st.session_state.setdefault("dt_sell_th", -SIGNAL_THRESHOLD)
+    st.session_state.setdefault("dt_buy_th_pending", buy_th)
+    st.session_state.setdefault("dt_sell_th_pending", sell_th)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**信号阈值**")
+    st.sidebar.number_input(
+        "买入阈值 (≥)", min_value=0.0, max_value=1.0, step=0.05,
+        key="dt_buy_th_pending",
+        help="信号值 ≥ 此阈值算买入；改完点「刷新」才生效",
+    )
+    st.sidebar.number_input(
+        "卖出阈值 (≤)", min_value=-1.0, max_value=0.0, step=0.05,
+        key="dt_sell_th_pending",
+        help="信号值 ≤ 此阈值算卖出；改完点「刷新」才生效",
+    )
+    if (st.session_state["dt_buy_th_pending"] != buy_th
+            or st.session_state["dt_sell_th_pending"] != sell_th):
+        st.sidebar.caption(":orange[阈值已修改，点「刷新」生效]")
+
     st.sidebar.markdown("---")
 
     button_pressed = st.sidebar.button("刷新", type="primary")
 
+    # 点刷新时提交待生效阈值为当前生效阈值（要在 key 计算之前完成提交）
+    if button_pressed:
+        st.session_state["dt_buy_th"] = st.session_state["dt_buy_th_pending"]
+        st.session_state["dt_sell_th"] = st.session_state["dt_sell_th_pending"]
+        buy_th = st.session_state["dt_buy_th"]
+        sell_th = st.session_state["dt_sell_th"]
+
     # 触发分析：按钮、首次自动、selection 变化都会重算
-    key = (symbol, stype, time_range, source)
+    # 阈值并入 key，刷新后阈值变化触发重算（融合 decision 依赖阈值）
+    key = (symbol, stype, time_range, source, buy_th, sell_th)
     last_key = st.session_state.get("detail_last_key")
     need_analyze = button_pressed or auto_analyze or last_key is None or last_key != key
 
@@ -427,7 +463,8 @@ def page_detail():
             signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,
                                             enabled_signals=[source],
                                             progress_cb=_detail_progress if kronos_progress else None)
-            fusion_full = fuse_signals(signal_df_full, source=source)
+            fusion_full = fuse_signals(signal_df_full, source=source,
+                                        buy_threshold=buy_th, sell_threshold=sell_th)
 
             # 回测 df：严格裁到 time_range_days 范围
             cutoff = signal_df_full.index.max() - pd.Timedelta(days=time_range_days)
@@ -485,7 +522,7 @@ def page_detail():
 
         src_col = SOURCE_COLUMNS[source]
         signal_val = float(last.get(src_col, 0) or 0)
-        signal_color = "#e74c3c" if signal_val >= SIGNAL_THRESHOLD else "#27ae60" if signal_val <= -SIGNAL_THRESHOLD else "#666"
+        signal_color = "#e74c3c" if signal_val >= buy_th else "#27ae60" if signal_val <= sell_th else "#666"
 
         # 仓位建议
         pos_label = ""
@@ -509,7 +546,7 @@ def page_detail():
             f'<span style="font-size:16px;color:#666;margin-left:20px">收盘价 {last_close:.2f}</span>'
             f'<span style="font-size:16px;color:#666;margin-left:20px">信号值 </span>'
             f'<span style="font-size:20px;font-weight:bold;color:{signal_color}">{signal_val:.3f}</span>'
-            f'<span style="font-size:13px;color:#999;margin-left:6px">阈值 ±{SIGNAL_THRESHOLD}</span>'
+            f'<span style="font-size:13px;color:#999;margin-left:6px">阈值 买≥{buy_th:g} / 卖≤{sell_th:g}</span>'
             f'{pos_display}'
             f'</div>',
             unsafe_allow_html=True,
@@ -573,7 +610,7 @@ def page_detail():
             kronos_cols = st.columns(3)
             pred_pct = signal_val * KRONOS_SATURATE_PCT * 100  # 反推预测涨跌幅（%）
             sat_pct = KRONOS_SATURATE_PCT * 100
-            kronos_cols[0].markdown(f"**最新信号**\n\n值: **{signal_val:.3f}**\n\n阈值: ±{SIGNAL_THRESHOLD}")
+            kronos_cols[0].markdown(f"**最新信号**\n\n值: **{signal_val:.3f}**\n\n阈值: 买≥{buy_th:g} / 卖≤{sell_th:g}")
             kronos_cols[1].markdown(f"**预测未来 5 日**\n\n累计涨跌 ≈ **{pred_pct:+.2f}%**\n\n（±{sat_pct:.0f}% 为满分）")
             kronos_cols[2].markdown(f"**预测频率**\n\n每 5 个交易日滚动\n\n上下文 400 日")
 
@@ -687,8 +724,8 @@ def page_detail():
         decision_colors = ["#e74c3c" if d == 1 else "#27ae60" if d == -1 else "rgba(0,0,0,0)" for d in decisions]
         decision_sizes = [12 if d != 0 else 0 for d in decisions]
         fig.add_trace(go.Scatter(x=signal_df.index, y=decisions, name="决策", mode="markers", marker=dict(size=decision_sizes, color=decision_colors, symbol=["triangle-up" if d == 1 else "triangle-down" if d == -1 else "circle" for d in decisions])), row=r_sig, col=1)
-        fig.add_hline(y=SIGNAL_THRESHOLD, line_dash="dot", line_color="#e74c3c", line_width=0.5, row=r_sig, col=1, annotation_text=f"+{SIGNAL_THRESHOLD}", annotation_position="top right")
-        fig.add_hline(y=-SIGNAL_THRESHOLD, line_dash="dot", line_color="#27ae60", line_width=0.5, row=r_sig, col=1, annotation_text=f"-{SIGNAL_THRESHOLD}", annotation_position="bottom right")
+        fig.add_hline(y=buy_th, line_dash="dot", line_color="#e74c3c", line_width=0.5, row=r_sig, col=1, annotation_text=f"买≥{buy_th:g}", annotation_position="top right")
+        fig.add_hline(y=sell_th, line_dash="dot", line_color="#27ae60", line_width=0.5, row=r_sig, col=1, annotation_text=f"卖≤{sell_th:g}", annotation_position="bottom right")
         fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=0.5, row=r_sig, col=1)
 
         # ---- 净值曲线 ----
