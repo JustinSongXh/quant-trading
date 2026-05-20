@@ -124,7 +124,7 @@ SIGNAL_THRESHOLD = 0.3
 # 每个 source 计算一天信号所需的前置 K 线天数（buffer）
 # 例：技术指标当天信号 = f(K线[当天-60, 当天])；要展示 N 天信号需 fetch N + buffer 天
 SIGNAL_LOOKBACK = {
-    "technical": 60,    # MA60 充分稳定
+    "technical": 150,   # MACD slow EMA (span=26, adjust=False) 需 ~80 bar 收敛，60 自然日不够会误报金叉
     "chanlun": 150,     # 覆盖 B3 中枢逻辑
     "kronos": 400,      # 匹配 Kronos 模型自身上下文上限
 }
