@@ -134,10 +134,17 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
             # "现价==昨收 但涨跌幅≠0" 的不一致
             change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
             market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
+            # 指数 PE 腾讯虽返回数值但口径不明，不展示
+            pe_raw = rt.get("pe") if rt else None
+            if stype == "index" or pe_raw is None:
+                pe_val = "-"
+            else:
+                pe_val = round(float(pe_raw), 2)
 
             meta_cache[cache_id] = {
                 "市场": market_label, "股票": f"{name}({code})",
                 "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
+                "市盈率": pe_val,
                 "日期": last_date, "_code": code, "_type": stype,
             }
         except Exception:
@@ -146,6 +153,7 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
             meta_cache[cache_id] = {
                 "市场": market_label, "股票": f"{name}({code})",
                 "昨收": "-", "现价": "-", "涨跌幅": "-",
+                "市盈率": "-",
                 "日期": "-", "_code": code, "_type": stype,
             }
 
@@ -269,9 +277,9 @@ def page_overview():
         prev_label = f"昨收({prev_date[5:]})" if prev_date else "昨收"
 
         sig_label = f"{SIGNAL_SOURCE_LABELS[source]}信号"
-        col_ratios = [2.5, 1.2, 1.2, 1, 1.4, 1, 1, 0.8]
+        col_ratios = [2.5, 1.2, 1.2, 1, 1, 1.4, 1, 1, 0.8]
         header_cols = st.columns(col_ratios)
-        for col, title in zip(header_cols, ["股票", price_label, prev_label, "涨跌幅", sig_label, "推荐", "仓位", ""]):
+        for col, title in zip(header_cols, ["股票", price_label, prev_label, "涨跌幅", "市盈率", sig_label, "推荐", "仓位", ""]):
             col.markdown(f"**{title}**")
 
         # 数据行
@@ -290,6 +298,9 @@ def page_overview():
             else:
                 cols[3].write(chg)
 
+            # 市盈率
+            cols[4].write(row.get("市盈率", "-"))
+
             # 信号值带颜色（按 SIGNAL_THRESHOLD 区分有/无信号）
             sig_val = row["信号值"]
             if isinstance(sig_val, (int, float)):
@@ -299,24 +310,24 @@ def page_overview():
                     s_color = "#27ae60"
                 else:
                     s_color = "#666"
-                cols[4].markdown(f'<span style="color:{s_color};font-weight:bold">{sig_val:.3f}</span>', unsafe_allow_html=True)
+                cols[5].markdown(f'<span style="color:{s_color};font-weight:bold">{sig_val:.3f}</span>', unsafe_allow_html=True)
             else:
-                cols[4].write(sig_val)
+                cols[5].write(sig_val)
 
             # 推荐带颜色
             rec = row["推荐"]
             r_color = "#e74c3c" if rec == "买入" else "#27ae60" if rec == "卖出" else "#999"
-            cols[5].markdown(f'<span style="color:{r_color};font-weight:bold">{rec}</span>', unsafe_allow_html=True)
+            cols[6].markdown(f'<span style="color:{r_color};font-weight:bold">{rec}</span>', unsafe_allow_html=True)
 
             # 仓位建议
             pos = row.get("仓位建议", "")
             if pos:
-                cols[6].markdown(f'<span style="color:{r_color};font-weight:bold">{pos}</span>', unsafe_allow_html=True)
+                cols[7].markdown(f'<span style="color:{r_color};font-weight:bold">{pos}</span>', unsafe_allow_html=True)
             else:
-                cols[6].write("")
+                cols[7].write("")
 
             # 查看详情按钮
-            if cols[7].button("详情", key=f"btn_{row['_code']}_{row.get('_type', 'stock')}"):
+            if cols[8].button("详情", key=f"btn_{row['_code']}_{row.get('_type', 'stock')}"):
                 st.session_state["page"] = "单股票分析"
                 st.session_state["selected_code"] = row["_code"]
                 st.session_state["selected_type"] = row.get("_type", "stock")
@@ -524,6 +535,14 @@ def page_detail():
         signal_val = float(last.get(src_col, 0) or 0)
         signal_color = "#e74c3c" if signal_val >= buy_th else "#27ae60" if signal_val <= sell_th else "#666"
 
+        # 市盈率（指数/缺值显示 -；负 PE 即亏损股，原样展示）
+        rt_quote = get_realtime_quotes([(symbol, stype)]).get((symbol, stype))
+        pe_raw = rt_quote.get("pe") if rt_quote else None
+        if stype == "index" or pe_raw is None:
+            pe_text = "-"
+        else:
+            pe_text = f"{float(pe_raw):.2f}"
+
         # 仓位建议
         pos_label = ""
         pos_pct = ""
@@ -544,6 +563,8 @@ def page_detail():
             f'<span style="font-size:16px;color:#666">{SIGNAL_SOURCE_LABELS[source]}（{last_date}）</span>'
             f'<span style="font-size:32px;font-weight:bold;color:{rec_color};margin-left:20px">{rec_text}</span>'
             f'<span style="font-size:16px;color:#666;margin-left:20px">收盘价 {last_close:.2f}</span>'
+            f'<span style="font-size:16px;color:#666;margin-left:20px">市盈率 </span>'
+            f'<span style="font-size:20px;font-weight:bold;color:#333">{pe_text}</span>'
             f'<span style="font-size:16px;color:#666;margin-left:20px">信号值 </span>'
             f'<span style="font-size:20px;font-weight:bold;color:{signal_color}">{signal_val:.3f}</span>'
             f'<span style="font-size:13px;color:#999;margin-left:6px">阈值 买≥{buy_th:g} / 卖≤{sell_th:g}</span>'

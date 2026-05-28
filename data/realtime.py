@@ -10,17 +10,24 @@ _QT_URL = "https://qt.gtimg.cn/q="
 
 
 def _code_to_tencent(code: str, stock_type: str | None = None) -> str:
-    """转为腾讯行情代码格式"""
+    """转为腾讯行情代码格式（完整版接口，含 PE/PB 等估值字段）"""
     if is_hk_stock(code):
-        return f"s_hk{code}"
+        return f"hk{code}"
     if stock_type == "index":
-        # 指数：000xxx -> s_sh000xxx, 399xxx -> s_sz399xxx
+        # 指数：000xxx -> sh000xxx, 399xxx -> sz399xxx
         if code.startswith("3"):
-            return f"s_sz{code}"
-        return f"s_sh{code}"
+            return f"sz{code}"
+        return f"sh{code}"
     if code.startswith(("6", "9")):
-        return f"s_sh{code}"
-    return f"s_sz{code}"
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _safe_float(s):
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
 
 
 def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, str], dict]:
@@ -31,7 +38,9 @@ def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, 
                同一 code 不同 type 可并存（如 000001 既是平安银行也是上证指数）。
 
     Returns:
-        {(code, type): {"name", "price", "change", "change_pct"}}，type 缺省为 "stock"。
+        {(code, type): {"name", "price", "change", "change_pct", "pe"}}，type 缺省为 "stock"。
+        pe 字段为腾讯返回的市盈率（A股动态/港股 TTM），无值或解析失败时为 None。
+        指数也会返回 pe，但口径不明，调用方自行决定是否展示。
     """
     if not items:
         return {}
@@ -53,15 +62,16 @@ def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, 
         key = f"v_{tc}"
         for line in text.split("\n"):
             if key in line:
-                # v_s_sh600519="1~贵州茅台~600519~1342.25~-1.84~-0.14~48082~646834~~16808.60~GP-A~";
+                # 完整版字段（~ 分割）：1=name 3=price 31=change 32=change_pct 39=PE
                 parts = line.split("~")
-                if len(parts) >= 6:
+                if len(parts) >= 33:
                     try:
                         results[(code, stype)] = {
                             "name": parts[1],
                             "price": float(parts[3]),
-                            "change": float(parts[4]),
-                            "change_pct": float(parts[5]),
+                            "change": float(parts[31]),
+                            "change_pct": float(parts[32]),
+                            "pe": _safe_float(parts[39]) if len(parts) > 39 else None,
                         }
                     except (ValueError, IndexError):
                         pass
