@@ -459,7 +459,7 @@ def render_sentiment_card(symbol, stock_type):
     if st.button("📰 查看全部新闻列表 →", key=f"news_more_{symbol}"):
         st.session_state["page"] = "新闻列表"
         st.session_state["news_symbol"] = symbol
-        st.session_state["news_type"] = stock_type
+        st.session_state["news_jump"] = True
         st.rerun()
 
 
@@ -471,13 +471,40 @@ def page_news_list():
     from data.news import DEFAULT_WINDOW
 
     st.title("📰 新闻列表")
-    symbol = st.session_state.get("news_symbol")
-    stock_type = st.session_state.get("news_type")
-    if not symbol:
-        st.info("请先在「单股票分析」页选择股票并查看情绪卡片，再进入新闻列表。")
+
+    # 侧边栏选股（范围 = 股票池；指数无新闻源，不列入）
+    stocks = load_stock_pool()
+    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") != "index"]
+    hk_stocks = [s for s in stocks if s.get("market") == "HK"]
+
+    # 从单股票页跳转过来：一次性预选那只股票（写入 widget state，后续可自由改）
+    jump = st.session_state.pop("news_jump", False)
+    pre_code = st.session_state.get("news_symbol") if jump else None
+    if pre_code:
+        st.session_state["news_market"] = "港股" if is_hk_stock(pre_code) else "A股"
+
+    market_tabs = ["A股", "港股"]
+    market = st.sidebar.radio("市场", market_tabs, horizontal=True, key="news_market")
+    pool = hk_stocks if market == "港股" else a_stocks
+    if not pool:
+        st.sidebar.warning(f"{market}股票池为空")
         return
 
-    name = get_stock_name(symbol) or symbol
+    stock_options = {f"{s['name']}({s['code']})": s for s in pool}
+    if pre_code:
+        for label, s in stock_options.items():
+            if s["code"] == pre_code:
+                st.session_state["news_stock"] = label
+                break
+    # 切换市场后旧选项已不在当前池里：清掉残留值，避免 selectbox 因默认值越界报错
+    if st.session_state.get("news_stock") not in stock_options:
+        st.session_state.pop("news_stock", None)
+    selected = st.sidebar.selectbox("选择股票", list(stock_options.keys()), key="news_stock")
+    chosen = stock_options[selected]
+    symbol = chosen["code"]
+    stock_type = chosen.get("type", "stock")
+    name = chosen["name"]
+
     st.caption(f"{name}（{symbol}）· 过去 {DEFAULT_WINDOW} 个交易日窗口 · 公告/新闻/股吧")
     if st.button("← 返回单股票分析"):
         st.session_state["page"] = "单股票分析"
