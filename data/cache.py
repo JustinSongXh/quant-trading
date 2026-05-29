@@ -127,3 +127,130 @@ def load_kline(symbol: str) -> pd.DataFrame | None:
     except duckdb.CatalogException:
         conn.close()
         return None
+
+
+# ========== 新闻/公告/股吧缓存（issue #1） ==========
+
+NEWS_SOURCES = ("cninfo", "em_news", "em_guba")
+
+
+def _ensure_news_table():
+    """确保 news_items 表存在"""
+    _ensure_dir()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_items (
+                source          TEXT,
+                external_id     TEXT,
+                stock_code      TEXT,
+                title           TEXT,
+                content         TEXT,
+                published_at    TIMESTAMP,
+                fetched_at      TIMESTAMP,
+                sentiment_score REAL,
+                PRIMARY KEY (source, external_id, stock_code)
+            )
+            """
+        )
+    finally:
+        conn.close()
+
+
+def upsert_news_items(items: list[dict]) -> int:
+    """批量插入新闻条目；主键冲突的行直接跳过。返回新插入条数。
+
+    items 每项必须含：source, external_id, stock_code, published_at；
+    可选：title, content。
+    """
+    if not items:
+        return 0
+    _ensure_news_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0]
+        fetched_at = datetime.now()
+        for it in items:
+            conn.execute(
+                """
+                INSERT INTO news_items
+                  (source, external_id, stock_code, title, content,
+                   published_at, fetched_at, sentiment_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT (source, external_id, stock_code) DO NOTHING
+                """,
+                [
+                    it["source"],
+                    it["external_id"],
+                    it["stock_code"],
+                    it.get("title", "") or "",
+                    it.get("content", "") or "",
+                    it["published_at"],
+                    fetched_at,
+                ],
+            )
+        after = conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0]
+    finally:
+        conn.close()
+    return after - before
+
+
+def load_news_items(
+    stock_code: str,
+    since: datetime | None = None,
+    sources: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """读取某股票的新闻条目（按 published_at 倒序）"""
+    _ensure_news_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    where = ["stock_code = ?"]
+    params: list = [stock_code]
+    if since is not None:
+        where.append("published_at >= ?")
+        params.append(since)
+    if sources:
+        placeholders = ",".join(["?"] * len(sources))
+        where.append(f"source IN ({placeholders})")
+        params.extend(sources)
+    sql = f"""
+        SELECT source, external_id, stock_code, title, content,
+               published_at, fetched_at, sentiment_score
+        FROM news_items
+        WHERE {' AND '.join(where)}
+        ORDER BY published_at DESC
+    """
+    try:
+        df = conn.execute(sql, params).fetchdf()
+    finally:
+        conn.close()
+    return df
+
+
+def get_latest_news_published_at(stock_code: str, source: str) -> datetime | None:
+    """获取某股票某源已缓存的最新 published_at，用于增量拉取"""
+    _ensure_news_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT MAX(published_at) FROM news_items WHERE stock_code = ? AND source = ?",
+            [stock_code, source],
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row and row[0] else None
+
+
+def purge_news_outside_window(window_start: datetime) -> int:
+    """删除 published_at < window_start 的新闻条目（窗口滚动），返回删除条数"""
+    _ensure_news_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0]
+        conn.execute(
+            "DELETE FROM news_items WHERE published_at < ?", [window_start]
+        )
+        after = conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0]
+    finally:
+        conn.close()
+    return before - after
