@@ -13,3 +13,6 @@ torch>=2.0.0
 einops>=0.8.0
 huggingface_hub>=0.30.0
 safetensors>=0.4.0
+
+# 新闻情绪分析（中文金融情绪模型，本地 CPU 推理）
+transformers>=4.40.0

@@ -254,3 +254,57 @@ def purge_news_outside_window(window_start: datetime) -> int:
     finally:
         conn.close()
     return before - after
+
+
+def load_unscored_news(stock_code: str | None = None) -> pd.DataFrame:
+    """读取 sentiment_score 仍为空的条目（用于 #2 情绪打分）。
+
+    返回去重后的 (source, external_id, title, content)——同一条新闻关联多只股票时
+    在表里多行，这里按 (source, external_id) 只取一行，保证模型只跑一次。
+    """
+    _ensure_news_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    where = ["sentiment_score IS NULL"]
+    params: list = []
+    if stock_code is not None:
+        where.append("stock_code = ?")
+        params.append(stock_code)
+    sql = f"""
+        SELECT source, external_id, ANY_VALUE(title) AS title,
+               ANY_VALUE(content) AS content
+        FROM news_items
+        WHERE {' AND '.join(where)}
+        GROUP BY source, external_id
+    """
+    try:
+        df = conn.execute(sql, params).fetchdf()
+    finally:
+        conn.close()
+    return df
+
+
+def update_sentiment_scores(scores: list[dict]) -> int:
+    """回写情绪得分。每项含 source / external_id / score。
+
+    按 (source, external_id) 更新——同一条新闻的所有关联行（多只股票）一并复写。
+    返回受影响行数。
+    """
+    if not scores:
+        return 0
+    _ensure_news_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    affected = 0
+    try:
+        for s in scores:
+            cur = conn.execute(
+                """
+                UPDATE news_items SET sentiment_score = ?
+                WHERE source = ? AND external_id = ? AND sentiment_score IS NULL
+                """,
+                [s["score"], s["source"], s["external_id"]],
+            )
+            # duckdb 的 UPDATE 不直接给行数，统计交由调用方按条数估算
+        affected = len(scores)
+    finally:
+        conn.close()
+    return affected

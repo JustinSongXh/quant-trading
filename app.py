@@ -335,6 +335,69 @@ def page_overview():
                 st.rerun()
 
 
+_SENTIMENT_ROWS = [
+    ("announcement", "公告", "#7B1FA2"),
+    ("news", "新闻", "#2196F3"),
+    ("guba", "股吧", "#FF6F00"),
+]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_sentiment_data(symbol, stock_type, day):
+    """过去 10 个交易日的分源情绪（缓存：同股同日不重复下载/打分）。day 用于按日失效。"""
+    from analysis.sentiment import analyze_sentiment
+    return analyze_sentiment(symbol, stock_type=stock_type)
+
+
+def render_sentiment_card(symbol, stock_type):
+    """单股票分析页：过去 10 个交易日情绪卡片（公告/新闻/股吧三行得分曲线+条数）"""
+    from datetime import date
+
+    st.markdown("---")
+    st.subheader("📰 过去 10 个交易日情绪")
+    st.caption("本地金融情绪模型（中文 BERT，3 分类 → -1~+1）对公告/新闻/股吧分别打分，仅作参考")
+    try:
+        with st.spinner("采集新闻并打分中（首次加载模型较慢）…"):
+            df = get_sentiment_data(symbol, stock_type, date.today().isoformat())
+    except Exception as e:
+        st.info(f"情绪数据暂不可用：{e}")
+        return
+    if df is None or df.empty:
+        st.info("窗口内暂无可用新闻/公告/股吧数据")
+        return
+
+    # 概览：各源均值 + 总条数
+    cols = st.columns(3)
+    for col, (pref, label, _) in zip(cols, _SENTIMENT_ROWS):
+        cnt = int(df[f"{pref}_count"].sum())
+        if cnt:
+            avg = (df[f"{pref}_score"] * df[f"{pref}_count"]).sum() / cnt
+            col.metric(f"{label}情绪", f"{avg:+.2f}", f"{cnt} 条")
+        else:
+            col.metric(f"{label}情绪", "—", "0 条")
+
+    # 三行得分曲线（marker 大小随条数）
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+        subplot_titles=[f"{label}情绪" for _, label, _ in _SENTIMENT_ROWS],
+    )
+    for i, (pref, label, color) in enumerate(_SENTIMENT_ROWS, start=1):
+        sc = df[f"{pref}_score"]
+        cnt = df[f"{pref}_count"]
+        mask = cnt > 0
+        fig.add_trace(go.Scatter(
+            x=df.index[mask], y=sc[mask], mode="lines+markers", name=label,
+            line=dict(color=color, width=1.5),
+            marker=dict(size=[max(6, min(22, 6 + c)) for c in cnt[mask]], color=color),
+            customdata=cnt[mask],
+            hovertemplate=f"{label} %{{x}}<br>得分 %{{y:.2f}}<br>条数 %{{customdata}}<extra></extra>",
+        ), row=i, col=1)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=0.5, row=i, col=1)
+        fig.update_yaxes(range=[-1.1, 1.1], row=i, col=1)
+    fig.update_layout(height=480, showlegend=False, margin=dict(l=50, r=20, t=40, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ========== 单股票详细分析页 ==========
 
 def page_detail():
@@ -787,6 +850,9 @@ def page_detail():
             st.dataframe(trade_df, use_container_width=True, hide_index=True)
         else:
             st.info("回测期间无交易发生")
+
+        # ========== 过去 10 个交易日情绪（公告/新闻/股吧） ==========
+        render_sentiment_card(symbol, stype)
 
 
 # ========== 股票池管理页 ==========
