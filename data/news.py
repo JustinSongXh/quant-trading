@@ -1,8 +1,10 @@
 """多源新闻/公告/股吧采集编排（issue #1）
 
-维护"过去 N 个有效交易日"窗口的数据：增量拉取 → upsert 缓存 → 滚动清理 → 返回。
+维护"过去 N 个有效交易日"窗口的数据：增量拉取 → upsert 缓存 → 返回。
 - 增量：每个源只抓 (缓存最新, 今天]，窗口内已缓存的不重拉；首次冷启动拉满窗口。
 - 窗口：用 AKShare 交易日历定边界，窗口内的日历日（含周末）数据全部保留。
+- 清理：窗口外旧数据由定时任务（purge_news.py → purge_expired_news）统一删，
+  不在访问路径里触发，避免每次浏览都顺带删库。
 - 数据源见 data/news_sources/；情绪打分（sentiment_score）由 analysis/sentiment.py 填写。
 """
 
@@ -97,5 +99,17 @@ def fetch_stock_news(
         inserted = upsert_news_items(items)
         logger.info(f"  {symbol} {src.SOURCE}: 抓到 {len(items)} 条，新增 {inserted} 条")
 
-    purge_news_outside_window(window_start)
+    # 注意：这里只负责写入；窗口外旧数据的清理交由定时任务（purge_news.py →
+    # purge_expired_news）统一做，不在每次访问时触发删除。
     return load_news_items(symbol, since=window_start)
+
+
+def purge_expired_news(lookback_trading_days: int = DEFAULT_WINDOW) -> int:
+    """删除窗口外（早于过去 N 个交易日起点）的新闻条目，返回删除条数。
+
+    供定时任务调用：采集/打分路径只写入，清理统一在这里做。
+    """
+    window_start = _trading_window_start(lookback_trading_days)
+    deleted = purge_news_outside_window(window_start)
+    logger.info(f"清理窗口外新闻：删除 {deleted} 条（窗口起点 {window_start:%Y-%m-%d}）")
+    return deleted

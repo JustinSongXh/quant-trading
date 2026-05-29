@@ -84,6 +84,7 @@ quant-trading/
 │   └── logger.py            # 日志
 ├── main.py                  # 回测入口
 ├── scanner.py               # 盘后信号扫描
+├── purge_news.py            # 定时清理窗口外新闻数据
 ├── app.py                   # Streamlit 可视化看板（3 页面）
 ├── requirements.txt
 ├── .env.example
@@ -140,6 +141,10 @@ python scanner.py
 ```bash
 # 每个交易日 15:30 自动扫描
 30 15 * * 1-5 cd /path/to/quant-trading && .venv/bin/python scanner.py >> /var/log/quant-scanner.log 2>&1
+
+# 新闻数据清理：每日 03:00 删除超出窗口（过去 N 个交易日）的新闻/公告/股吧
+# 采集/打分在用户访问时写入，删除统一由该定时任务执行
+0 3 * * * docker exec quant-app python purge_news.py >> /var/log/quant-purge-news.log 2>&1
 ```
 
 ## 配置说明
