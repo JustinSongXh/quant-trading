@@ -141,11 +141,11 @@ python scanner.py
 ```bash
 # 每个交易日 15:30 自动扫描
 30 15 * * 1-5 cd /path/to/quant-trading && .venv/bin/python scanner.py >> /var/log/quant-scanner.log 2>&1
-
-# 新闻数据清理：每日 03:00 删除超出窗口（过去 N 个交易日）的新闻/公告/股吧
-# 采集/打分在用户访问时写入，删除统一由该定时任务执行
-0 3 * * * docker exec quant-app python purge_news.py >> /var/log/quant-purge-news.log 2>&1
 ```
+
+> 新闻数据清理无需 crontab：app 进程内置 APScheduler，每日 03:00 自动删除超出窗口
+> （过去 N 个交易日）的新闻/公告/股吧。采集/打分只在用户访问时写入，删除由该定时任务统一做。
+> 需手动清理时可随时运行 `python purge_news.py`（容器内：`docker exec quant-app python purge_news.py`）。
 
 ## 配置说明
 

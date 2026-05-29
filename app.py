@@ -21,6 +21,26 @@ from analysis.chanlun import analyze as chanlun_analyze
 
 st.set_page_config(page_title="A股港股量化分析小程序", layout="wide")
 
+
+@st.cache_resource
+def _start_news_purge_scheduler():
+    """进程内每日定时清理窗口外新闻。
+
+    cache_resource 保证整个 app 进程只起一次（Streamlit 每次交互都会重跑脚本，
+    普通模块级代码会重复执行；缓存资源不会）。容器 TZ=Asia/Shanghai，按本地时间触发。
+    """
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from data.news import purge_expired_news
+
+    sched = BackgroundScheduler()
+    sched.add_job(purge_expired_news, "cron", hour=3, minute=0,
+                  id="purge_expired_news", replace_existing=True)
+    sched.start()
+    return sched
+
+
+_start_news_purge_scheduler()
+
 # 移动端适配 CSS
 st.markdown("""
 <style>
