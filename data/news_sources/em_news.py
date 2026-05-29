@@ -20,6 +20,11 @@ SOURCE = "em_news"
 _URL = "https://search-api-web.eastmoney.com/search/jsonp"
 
 
+def detail_url(stock_code: str, external_id: str, published_at=None) -> str:
+    """external_id 即新闻详情页 URL，直接返回"""
+    return external_id
+
+
 def _clean(s: str) -> str:
     """去掉高亮标签、全角空格、换行"""
     if not s:

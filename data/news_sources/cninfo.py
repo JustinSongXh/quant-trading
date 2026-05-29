@@ -37,6 +37,17 @@ def _load_org_map() -> dict:
     return _org_map
 
 
+def detail_url(stock_code: str, external_id: str, published_at=None) -> str:
+    """巨潮公告详情页。orgId 取自进程内缓存的映射表（采集时已加载）"""
+    org = _load_org_map().get(stock_code, "")
+    date_str = published_at.strftime("%Y-%m-%d") if published_at is not None else ""
+    return (
+        "http://www.cninfo.com.cn/new/disclosure/detail?"
+        f"stockCode={stock_code}&announcementId={external_id}"
+        f"&orgId={org}&announcementTime={date_str}"
+    )
+
+
 def fetch(
     symbol: str,
     start: datetime,

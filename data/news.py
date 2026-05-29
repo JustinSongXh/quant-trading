@@ -24,6 +24,20 @@ logger = get_logger("news")
 
 DEFAULT_WINDOW = 10
 
+# source 标识 → 采集模块（用于反查原文链接）
+_SOURCE_MODULES = {m.SOURCE: m for m in (cninfo, em_news, em_guba)}
+
+
+def news_detail_url(source, stock_code, external_id, published_at=None):
+    """按来源拼出原文链接，无法构造时返回 None"""
+    mod = _SOURCE_MODULES.get(source)
+    if mod is None or not hasattr(mod, "detail_url"):
+        return None
+    try:
+        return mod.detail_url(stock_code, external_id, published_at) or None
+    except Exception:
+        return None
+
 
 def _trading_window_start(lookback_trading_days: int) -> datetime:
     """过去 N 个有效交易日里最早一天的 00:00"""

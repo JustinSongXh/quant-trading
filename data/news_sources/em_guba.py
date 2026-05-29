@@ -19,6 +19,11 @@ _HEADERS = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 _LIST_RE = re.compile(r"article_list=(\{.*?\});")
 
 
+def detail_url(stock_code: str, external_id: str, published_at=None) -> str:
+    """股吧帖子详情页：news,{code},{post_id}.html"""
+    return f"https://guba.eastmoney.com/news,{stock_code},{external_id}.html"
+
+
 def _parse_time(s: str, ref: datetime) -> datetime | None:
     """解析帖子时间。东财有时省略年份（"MM-DD HH:MM"），按参考时间补全。"""
     if not s:

@@ -342,11 +342,62 @@ _SENTIMENT_ROWS = [
 ]
 
 
+_SOURCE_BY_PREFIX = {"announcement": "cninfo", "news": "em_news", "guba": "em_guba"}
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_sentiment_data(symbol, stock_type, day):
     """过去 10 个交易日的分源情绪（缓存：同股同日不重复下载/打分）。day 用于按日失效。"""
     from analysis.sentiment import analyze_sentiment
     return analyze_sentiment(symbol, stock_type=stock_type)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_news_items(symbol, stock_type, day):
+    """窗口内全部新闻条目（按 published_at 倒序），供明细列表展示。day 用于按日失效。
+
+    依赖 get_sentiment_data 已先行采集+打分，这里只读缓存。
+    """
+    from data.cache import load_news_items
+    from data.news import DEFAULT_WINDOW, _trading_window_start
+    return load_news_items(symbol, since=_trading_window_start(DEFAULT_WINDOW))
+
+
+def _sentiment_badge(score):
+    """单条情绪得分 → emoji 标记（-1/0/+1 三档）"""
+    if score is None or pd.isna(score):
+        return "⚪"
+    if score > 0.3:
+        return "🟢"
+    if score < -0.3:
+        return "🔴"
+    return "⚪"
+
+
+def _render_news_items(items, source_filter=None, limit=None):
+    """渲染一组新闻条目：每条可展开看摘要 + 跳原文链接"""
+    from data.news import news_detail_url
+
+    if source_filter:
+        items = items[items["source"] == source_filter]
+    if limit:
+        items = items.head(limit)
+    if items.empty:
+        st.caption("窗口内暂无数据")
+        return
+    for r in items.itertuples():
+        ts = pd.to_datetime(r.published_at).strftime("%m-%d %H:%M")
+        title = r.title or "(无标题)"
+        with st.expander(f"{_sentiment_badge(r.sentiment_score)}  {ts}　{title}"):
+            if r.content:
+                st.write(r.content)
+            else:
+                st.caption("（该来源未抓取正文，点击下方链接查看原文）")
+            url = news_detail_url(
+                r.source, r.stock_code, r.external_id, pd.to_datetime(r.published_at)
+            )
+            if url:
+                st.markdown(f"[🔗 查看原文]({url})")
 
 
 def render_sentiment_card(symbol, stock_type):
@@ -396,6 +447,63 @@ def render_sentiment_card(symbol, stock_type):
         fig.update_yaxes(range=[-1.1, 1.1], row=i, col=1)
     fig.update_layout(height=480, showlegend=False, margin=dict(l=50, r=20, t=40, b=20))
     st.plotly_chart(fig, use_container_width=True)
+
+    # 各源最新 10 条新闻明细
+    items = get_news_items(symbol, stock_type, date.today().isoformat())
+    st.markdown("##### 📋 最新新闻明细（每源最新 10 条）")
+    tabs = st.tabs([label for _, label, _ in _SENTIMENT_ROWS])
+    for tab, (pref, label, _) in zip(tabs, _SENTIMENT_ROWS):
+        with tab:
+            _render_news_items(items, source_filter=_SOURCE_BY_PREFIX[pref], limit=10)
+
+    if st.button("📰 查看全部新闻列表 →", key=f"news_more_{symbol}"):
+        st.session_state["page"] = "新闻列表"
+        st.session_state["news_symbol"] = symbol
+        st.session_state["news_type"] = stock_type
+        st.rerun()
+
+
+# ========== 新闻列表页 ==========
+
+def page_news_list():
+    from datetime import date
+
+    from data.news import DEFAULT_WINDOW
+
+    st.title("📰 新闻列表")
+    symbol = st.session_state.get("news_symbol")
+    stock_type = st.session_state.get("news_type")
+    if not symbol:
+        st.info("请先在「单股票分析」页选择股票并查看情绪卡片，再进入新闻列表。")
+        return
+
+    name = get_stock_name(symbol) or symbol
+    st.caption(f"{name}（{symbol}）· 过去 {DEFAULT_WINDOW} 个交易日窗口 · 公告/新闻/股吧")
+    if st.button("← 返回单股票分析"):
+        st.session_state["page"] = "单股票分析"
+        st.session_state["selected_code"] = symbol
+        st.session_state["selected_type"] = stock_type
+        st.session_state["auto_analyze"] = True
+        st.rerun()
+
+    try:
+        with st.spinner("采集新闻并打分中（首次加载模型较慢）…"):
+            get_sentiment_data(symbol, stock_type, date.today().isoformat())
+            items = get_news_items(symbol, stock_type, date.today().isoformat())
+    except Exception as e:
+        st.info(f"新闻数据暂不可用：{e}")
+        return
+    if items is None or items.empty:
+        st.info("窗口内暂无新闻/公告/股吧数据")
+        return
+
+    src_labels = {"全部": None}
+    src_labels.update({label: _SOURCE_BY_PREFIX[pref] for pref, label, _ in _SENTIMENT_ROWS})
+    choice = st.radio("来源", list(src_labels.keys()), horizontal=True)
+    src = src_labels[choice]
+    sub = items if src is None else items[items["source"] == src]
+    st.caption(f"共 {len(sub)} 条")
+    _render_news_items(sub)
 
 
 # ========== 单股票详细分析页 ==========
@@ -952,7 +1060,7 @@ def page_manage():
 
 # ========== 页面路由 ==========
 
-pages = ["全局信号总览", "单股票分析", "股票池管理"]
+pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理"]
 default_page = st.session_state.get("page", "全局信号总览")
 default_idx = pages.index(default_page) if default_page in pages else 0
 
@@ -963,5 +1071,7 @@ if page == "全局信号总览":
     page_overview()
 elif page == "单股票分析":
     page_detail()
+elif page == "新闻列表":
+    page_news_list()
 else:
     page_manage()
