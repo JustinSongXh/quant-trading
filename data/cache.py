@@ -232,8 +232,13 @@ def get_latest_news_published_at(stock_code: str, source: str) -> datetime | Non
     _ensure_news_table()
     conn = duckdb.connect(CACHE_DB_PATH)
     try:
+        # 用 ORDER BY ... LIMIT 1 取最新值，而非 MAX() 聚合：
+        # DuckDB 1.5.2 优化器对空结果集的聚合统计传播会触发内部断言崩溃
+        # （Attempted to access index 0 within vector of size 0）。
         row = conn.execute(
-            "SELECT MAX(published_at) FROM news_items WHERE stock_code = ? AND source = ?",
+            "SELECT published_at FROM news_items "
+            "WHERE stock_code = ? AND source = ? AND published_at IS NOT NULL "
+            "ORDER BY published_at DESC LIMIT 1",
             [stock_code, source],
         ).fetchone()
     finally:
