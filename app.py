@@ -17,6 +17,7 @@ from strategy.signals import build_signals
 from strategy.fusion import fuse_signals, SOURCE_COLUMNS
 from backtest.engine import run_backtest
 from backtest.metrics import calc_metrics
+from strategy.trade_strategy import list_trade_strategies, get_trade_strategy
 from analysis.chanlun import analyze as chanlun_analyze
 
 st.set_page_config(page_title="A股港股量化分析小程序", layout="wide")
@@ -1105,9 +1106,230 @@ def page_manage():
             st.info("输入关键词搜索 A 股（约 5200 只）或港股（30 只热门），回车确认。")
 
 
+# ========== 自定义策略页 ==========
+
+def _render_strategy_params(params: list[dict], key_prefix: str) -> dict:
+    """按策略 PARAMS 元数据动态渲染参数输入框（主面板），返回 {param_key: value}
+
+    完全数据驱动：新策略只要在自己的 PARAMS 里声明参数即可，无需改这里。
+    """
+    kwargs = {}
+    if not params:
+        return kwargs
+    cols = st.columns(min(len(params), 3))
+    for i, p in enumerate(params):
+        col = cols[i % len(cols)]
+        wkey = f"{key_prefix}_{p['key']}"
+        if p.get("is_pct"):
+            # 百分比参数：界面用百分数显示，回传时转回小数
+            val = col.number_input(
+                f"{p['label']}（%）",
+                min_value=float(p["min"]) * 100, max_value=float(p["max"]) * 100,
+                value=st.session_state.get(wkey, float(p["default"]) * 100),
+                step=float(p["step"]) * 100, key=wkey,
+            )
+            kwargs[p["key"]] = round(val / 100, 4)
+        else:
+            val = col.number_input(
+                p["label"],
+                min_value=float(p["min"]), max_value=float(p["max"]),
+                value=st.session_state.get(wkey, float(p["default"])),
+                step=float(p["step"]), key=wkey,
+            )
+            kwargs[p["key"]] = val
+    return kwargs
+
+
+def page_custom_strategy():
+    st.title("A股港股量化分析小程序")
+    st.subheader("自定义交易策略")
+    st.caption("交易策略负责「持仓周期里如何分批进出仓」，与左侧信号源（决定建仓触发时机）组合使用。")
+
+    strategies = list_trade_strategies(custom_only=True)
+    if not strategies:
+        st.info("暂无可用的自定义交易策略。")
+        return
+
+    # ---- 侧边栏：选股 + 信号源（建仓触发）----
+    stocks = load_stock_pool()
+    idx_stocks = [s for s in stocks if s.get("type") == "index"]
+    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") != "index"]
+    hk_stocks = [s for s in stocks if s.get("market") == "HK"]
+
+    market_tabs = ["A股", "港股"]
+    if idx_stocks:
+        market_tabs = ["指数"] + market_tabs
+    market_tab = st.sidebar.radio("市场", market_tabs, horizontal=True, key="cs_market")
+    if market_tab == "指数":
+        pool = idx_stocks
+    elif market_tab == "港股":
+        pool = hk_stocks
+    else:
+        pool = a_stocks
+
+    stock_options = {f"{s['name']}({s['code']})": s for s in pool}
+    if not stock_options:
+        st.sidebar.warning(f"{market_tab}股票池为空")
+        return
+    selected = st.sidebar.selectbox("选择股票", list(stock_options.keys()), key="cs_stock")
+    sel = stock_options[selected]
+    symbol = sel["code"]
+    stype = sel.get("type", "stock")
+    name = get_stock_name(symbol, stock_type=stype)
+
+    time_range = st.sidebar.selectbox("回测时间范围", ["近3个月", "近6个月", "近1年", "近2年"],
+                                       index=2, key="cs_time_range")
+    time_range_days = {"近3个月": 90, "近6个月": 180, "近1年": 365, "近2年": 730}[time_range]
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**信号源（建仓触发）**")
+    sources = list(SIGNAL_SOURCE_LABELS.keys())
+    source = st.sidebar.radio(
+        "信号源", options=sources, format_func=lambda k: SIGNAL_SOURCE_LABELS[k],
+        index=sources.index(DEFAULT_SIGNAL_SOURCE), key="cs_source",
+        label_visibility="collapsed",
+    )
+    st.sidebar.caption("建仓时机由该信号源的买入信号触发；建仓后由所选交易策略接管。")
+
+    # ---- 主面板：选交易策略 + 参数（数据驱动）----
+    strat_labels = {s["name"]: s for s in strategies}
+    chosen_name = st.radio("交易策略", list(strat_labels.keys()), key="cs_strategy", horizontal=True)
+    meta = strat_labels[chosen_name]
+
+    # 参数输入（仅当该策略声明了 PARAMS 才显示，放主面板而非侧边栏）
+    param_kwargs = {}
+    if meta["params"]:
+        st.markdown("**策略参数**")
+        param_kwargs = _render_strategy_params(meta["params"], f"cs_param_{meta['key']}")
+
+    # 用当前参数实例化策略，读取（含动态阈值文案的）说明与算例
+    # 后端 __init__ 会再次校验阈值有效性，这里捕获并提示
+    try:
+        strategy = get_trade_strategy(meta["key"], **param_kwargs)
+    except ValueError as e:
+        st.error(f"策略参数无效：{e}")
+        st.stop()
+    with st.expander(f"📖 策略说明：{strategy.name}", expanded=True):
+        st.markdown(strategy.description)
+        if strategy.example:
+            st.markdown("**算例**")
+            st.markdown(strategy.example)
+
+    run = st.button("刷新行情并回测", type="primary", key="cs_run",
+                    help="重新抓取最新行情后回测；只调整策略参数无需点此，会自动即时重算")
+
+    # ---- 行情/信号缓存：只随 股票 / 区间 / 信号源 变化而重抓（贵，含网络）----
+    # 与策略参数解耦：改阈值、换策略只触发下面约 0.1s 的回测，不重新抓数据。
+    data_key = (symbol, stype, time_range, source)
+    data_cache = st.session_state.get("cs_data")
+    if run or not data_cache or data_cache.get("key") != data_key:
+        kronos_progress = st.empty() if source == "kronos" else None
+        def _cs_progress(cur, total, msg):
+            if kronos_progress:
+                if cur < total:
+                    kronos_progress.progress(cur / total, text=msg)
+                else:
+                    kronos_progress.empty()
+
+        with st.spinner(f"正在加载 {name}({symbol}) 行情数据..."):
+            buffer_days = SIGNAL_LOOKBACK[source]
+            df = get_stock_data(symbol, days=time_range_days + buffer_days,
+                                 force_refresh=run, stock_type=stype)
+            if df is None or df.empty:
+                st.error(f"无法获取 {name}({symbol}) 的行情数据，请稍后重试。")
+                st.session_state.pop("cs_data", None)
+                st.stop()
+
+            signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,
+                                            enabled_signals=[source],
+                                            progress_cb=_cs_progress if kronos_progress else None)
+            fusion_full = fuse_signals(signal_df_full, source=source)
+            cutoff = signal_df_full.index.max() - pd.Timedelta(days=time_range_days)
+            signal_df_bt = signal_df_full.loc[signal_df_full.index >= cutoff]
+            fusion_bt = fusion_full.loc[fusion_full.index >= cutoff]
+
+        st.session_state["cs_data"] = {
+            "key": data_key, "signal_df_bt": signal_df_bt, "fusion_bt": fusion_bt,
+        }
+        data_cache = st.session_state["cs_data"]
+
+    signal_df_bt = data_cache["signal_df_bt"]
+    fusion_bt = data_cache["fusion_bt"]
+
+    # ---- 回测：随所选策略 / 参数即时重算（纯计算，约 0.1s）----
+    result = run_backtest(symbol, signal_df_bt, fusion_bt, stock_type=stype,
+                          trade_strategy=strategy)
+    metrics = calc_metrics(result["net_values"], result["initial_capital"])
+    trades = result["trade_log"]
+
+    # ---- 绩效指标 ----
+    st.markdown("---")
+    st.subheader(f"{name}({symbol}) 回测结果（{time_range}）")
+    cols = st.columns(6)
+    labels = ["总收益", "年化收益", "最大回撤", "夏普比率", "胜率", "交易天数"]
+    mkeys = ["total_return", "annual_return", "max_drawdown", "sharpe_ratio", "win_rate", "trading_days"]
+    for col, label, mk in zip(cols, labels, mkeys):
+        val = metrics.get(mk, 0)
+        if mk in ("total_return", "annual_return", "max_drawdown", "win_rate"):
+            col.metric(label, f"{val}%")
+        else:
+            col.metric(label, val)
+
+    # ---- 图表：K线+买卖点 / 净值 ----
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                        row_heights=[0.68, 0.32], subplot_titles=["K线 & 买卖点", "净值曲线"])
+    fig.add_trace(go.Candlestick(
+        x=signal_df_bt.index, open=signal_df_bt["open"], high=signal_df_bt["high"],
+        low=signal_df_bt["low"], close=signal_df_bt["close"], name="K线",
+        increasing_line_color="#e74c3c", decreasing_line_color="#27ae60"), row=1, col=1)
+
+    buys = [t for t in trades if t["action"] == "BUY"]
+    sells = [t for t in trades if t["action"] == "SELL"]
+    if buys:
+        fig.add_trace(go.Scatter(
+            x=[t["date"] for t in buys], y=[t["price"] for t in buys], mode="markers+text",
+            marker=dict(symbol="triangle-up", size=14, color="#e74c3c", line=dict(width=1, color="white")),
+            text=["B"] * len(buys), textposition="bottom center", textfont=dict(size=9, color="#e74c3c"),
+            name=f"买入({len(buys)})", hovertext=[f"买入 {t['shares']}股 @ {t['price']:.2f}" for t in buys],
+            hoverinfo="text+x"), row=1, col=1)
+    if sells:
+        fig.add_trace(go.Scatter(
+            x=[t["date"] for t in sells], y=[t["price"] for t in sells], mode="markers+text",
+            marker=dict(symbol="triangle-down", size=14, color="#27ae60", line=dict(width=1, color="white")),
+            text=["S"] * len(sells), textposition="top center", textfont=dict(size=9, color="#27ae60"),
+            name=f"卖出({len(sells)})", hovertext=[f"卖出 {t['shares']}股 @ {t['price']:.2f}" for t in sells],
+            hoverinfo="text+x"), row=1, col=1)
+
+    nv = result["net_values"]
+    if not nv.empty:
+        fig.add_trace(go.Scatter(x=nv.index, y=nv["net_value"], name="净值",
+                                 line=dict(color="#3498db", width=2), fill="tozeroy",
+                                 fillcolor="rgba(52,152,219,0.1)"), row=2, col=1)
+        fig.add_hline(y=result["initial_capital"], line_dash="dash", line_color="gray", row=2, col=1)
+
+    fig.update_layout(height=720, xaxis_rangeslider_visible=False,
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=10)),
+                      margin=dict(l=60, r=20, t=40, b=20))
+    for i in range(1, 3):
+        fig.update_xaxes(showticklabels=True, tickformat="%y/%m", dtick="M2", row=i, col=1)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ---- 交易明细 ----
+    if trades:
+        st.subheader("交易明细")
+        trade_df = pd.DataFrame(trades)
+        trade_df["action"] = trade_df["action"].map({"BUY": "买入", "SELL": "卖出"})
+        trade_df.columns = trade_df.columns.map({"date": "日期", "action": "操作", "price": "价格",
+                                                  "shares": "数量", "cost": "总成本", "revenue": "净收入",
+                                                  "symbol": "代码"}.get)
+        st.dataframe(trade_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("回测期间无交易发生（信号源未触发建仓，或策略未满足进出仓条件）。")
+
+
 # ========== 页面路由 ==========
 
-pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理"]
+pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "自定义策略"]
 default_page = st.session_state.get("page", "全局信号总览")
 default_idx = pages.index(default_page) if default_page in pages else 0
 
@@ -1120,5 +1342,7 @@ elif page == "单股票分析":
     page_detail()
 elif page == "新闻列表":
     page_news_list()
-else:
+elif page == "股票池管理":
     page_manage()
+else:
+    page_custom_strategy()
