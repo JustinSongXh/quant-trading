@@ -1318,12 +1318,28 @@ def page_custom_strategy():
     # ---- 交易明细 ----
     if trades:
         st.subheader("交易明细")
+        # 当前收益：到该笔为止的累计盈亏（已实现 + 当前持仓按该行价格的浮盈），含手续费
+        # = 成交后「现金 + 持股×该行价格 − 初始资金」，持仓部分即 持股×价 − 持股×均价
+        init_cap = result["initial_capital"]
+        cash, shares, profits = init_cap, 0, []
+        for t in trades:
+            if t["action"] == "BUY":
+                cash -= t.get("cost", 0)
+                shares += t["shares"]
+            else:
+                cash += t.get("revenue", 0)
+                shares -= t["shares"]
+            profits.append(round(cash + shares * t["price"] - init_cap, 2))
+
         trade_df = pd.DataFrame(trades)
         trade_df["action"] = trade_df["action"].map({"BUY": "买入", "SELL": "卖出"})
         trade_df.columns = trade_df.columns.map({"date": "日期", "action": "操作", "price": "价格",
                                                   "shares": "数量", "cost": "总成本", "revenue": "净收入",
                                                   "symbol": "代码"}.get)
+        trade_df["当前收益"] = profits
         st.dataframe(trade_df, use_container_width=True, hide_index=True)
+        st.caption("当前收益 = 到该笔为止的累计盈亏（已实现 + 当前持仓按该行成交价的浮盈，含手续费）；"
+                   "末行若仍有持仓，其按最新收盘价的盈亏见上方「总收益」。")
     else:
         st.info("回测期间无交易发生（信号源未触发建仓，或策略未满足进出仓条件）。")
 
