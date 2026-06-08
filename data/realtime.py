@@ -30,6 +30,13 @@ def _safe_float(s):
         return None
 
 
+def _parse_quote_date(s):
+    """腾讯行情时间字段（parts[30]，形如 20260608161427）→ 'YYYY-MM-DD'，失败返回 None"""
+    if s and len(s) >= 8 and s[:8].isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return None
+
+
 def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, str], dict]:
     """批量获取实时行情
 
@@ -38,8 +45,11 @@ def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, 
                同一 code 不同 type 可并存（如 000001 既是平安银行也是上证指数）。
 
     Returns:
-        {(code, type): {"name", "price", "change", "change_pct", "pe"}}，type 缺省为 "stock"。
+        {(code, type): {"name", "price", "change", "change_pct", "pe",
+                        "date", "open", "high", "low", "volume"}}，type 缺省为 "stock"。
         pe 字段为腾讯返回的市盈率（A股动态/港股 TTM），无值或解析失败时为 None。
+        date 为该快照的交易日（'YYYY-MM-DD'）；非交易日腾讯会返回上一交易日快照，
+        调用方需用 date 校验是否为当日，避免把旧快照误当今日数据。
         指数也会返回 pe，但口径不明，调用方自行决定是否展示。
     """
     if not items:
@@ -72,6 +82,12 @@ def get_realtime_quotes(items: list[tuple[str, str | None]]) -> dict[tuple[str, 
                             "change": float(parts[31]),
                             "change_pct": float(parts[32]),
                             "pe": _safe_float(parts[39]) if len(parts) > 39 else None,
+                            # 当日 K 线补全用：日期 + OHLCV（最高/最低在更靠后字段）
+                            "date": _parse_quote_date(parts[30]) if len(parts) > 30 else None,
+                            "open": _safe_float(parts[5]),
+                            "high": _safe_float(parts[33]) if len(parts) > 33 else None,
+                            "low": _safe_float(parts[34]) if len(parts) > 34 else None,
+                            "volume": _safe_float(parts[6]),
                         }
                     except (ValueError, IndexError):
                         pass

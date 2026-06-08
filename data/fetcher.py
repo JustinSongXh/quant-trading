@@ -198,8 +198,41 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type
     close_time = time(16, 10) if is_hk_stock(symbol) else time(15, 5)
     if now.weekday() < 5 and now.time() < close_time:
         df = df[df.index < today]
+    elif now.weekday() < 5 and now.time() >= close_time and (df.empty or df.index.max() < today):
+        # 收盘后，数据源当日 EOD 往往尚未发布（baostock 傍晚才更新）：
+        # 用实时现价补一根当日 bar，避免 is_cache_fresh 因缺当日 bar 而永远不新鲜、反复重抓。
+        bar = _today_bar_from_realtime(symbol, stock_type, now.date(), df.columns)
+        if bar is not None:
+            df = pd.concat([df, bar]).sort_index()
+            df = df[~df.index.duplicated(keep="last")]
 
     return df
+
+
+def _today_bar_from_realtime(symbol: str, stock_type, today_date, columns) -> pd.DataFrame | None:
+    """收盘后用实时现价构造当日 K 线；非交易日快照（日期≠今日）或取价失败返回 None"""
+    from data.realtime import get_realtime_quotes  # 延迟导入避免与 realtime 循环依赖
+
+    rt_type = "index" if is_index(symbol, stock_type) else "stock"
+    q = get_realtime_quotes([(symbol, rt_type)]).get((symbol, rt_type))
+    if not q:
+        return None
+    # 日期校验：非交易日腾讯返回上一交易日快照，绝不能误当成今日
+    if q.get("date") != today_date.isoformat():
+        return None
+    close = q.get("price")
+    if not close:
+        return None
+    row = {
+        "open": q.get("open") or close,
+        "high": q.get("high") or close,
+        "low": q.get("low") or close,
+        "close": close,
+        "volume": q.get("volume") or 0,
+    }
+    cols = list(columns) if len(columns) else list(row.keys())
+    data = {c: row.get(c) for c in cols}
+    return pd.DataFrame([data], index=[pd.Timestamp(today_date)])
 
 
 def fetch_stock_info(symbol: str, stock_type: str | None = None) -> dict:

@@ -79,7 +79,19 @@ def is_cache_fresh(symbol: str) -> bool:
         last_bar = date.fromisoformat(meta["last_bar_date"][:10])
     except ValueError:
         return False
-    return last_bar >= _expected_last_bar_date(symbol)
+    if last_bar >= _expected_last_bar_date(symbol):
+        return True
+    # 兜底：今天已经抓过一次（updated_at 为今日），即便数据源仍给不出当日 bar
+    # （EOD 未发布 / 实时接口故障 / 节假日落到休市日），也别再反复重抓——等次日再要今天的 bar。
+    # 页面"刷新"按钮走 force_refresh，绕过本函数仍可强制重抓。
+    updated = meta.get("updated_at")
+    if updated:
+        try:
+            if date.fromisoformat(updated[:10]) >= datetime.now().date():
+                return True
+        except ValueError:
+            pass
+    return False
 
 
 def is_during_trading(symbol: str) -> bool:

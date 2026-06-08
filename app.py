@@ -72,8 +72,9 @@ def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
     cache_key = f"idx_{code}" if stock_type == "index" else code
     if not force_refresh and is_cache_fresh(cache_key):
         df = load_kline(cache_key)
-        # 缓存命中且行数足够才直接返回；否则走刷新分支补足天数
-        if df is not None and len(df) >= days:
+        # 缓存覆盖的"日期跨度"够长才直接返回；否则走刷新分支补足天数。
+        # 注意按日历天跨度比，而非行数——交易日数永远 < 日历天数，用 len 比会永远判不足而反复重抓。
+        if df is not None and not df.empty and (df.index.max() - df.index.min()).days >= days - 7:
             return df
     try:
         df = fetch_daily_kline(code, days=days, stock_type=stock_type)
