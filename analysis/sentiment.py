@@ -13,6 +13,8 @@ from data.cache import load_news_items, load_unscored_news, update_sentiment_sco
 from data.news import DEFAULT_WINDOW, _trading_window_start, fetch_stock_news
 from utils.logger import get_logger
 
+import threading
+
 import pandas as pd
 
 logger = get_logger("sentiment")
@@ -32,17 +34,23 @@ _COLUMNS = [
 
 _model = None
 _tokenizer = None
+# 串行化模型加载：Streamlit 每次 rerun 在独立线程执行，并发首次调用会同时触发
+# transformers v5 _LazyModule 懒加载，引发 "cannot import name" 竞态（#27）。
+_load_lock = threading.Lock()
 
 
 def _load_model():
     global _model, _tokenizer
     if _model is None:
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        with _load_lock:
+            if _model is None:  # 双重检查：等锁期间可能已被别的线程加载完
+                from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        logger.info(f"加载情绪模型 {MODEL_ID} ...")
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-        _model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
-        _model.eval()
+                logger.info(f"加载情绪模型 {MODEL_ID} ...")
+                _tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+                model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
+                model.eval()
+                _model = model  # 最后赋值，避免别的线程读到 eval() 前的半成品
     return _model, _tokenizer
 
 
