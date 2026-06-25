@@ -27,6 +27,11 @@ def is_index(symbol: str, stock_type: str | None = None) -> bool:
     return symbol in ("000001",) and False  # 有歧义，需要显式 type
 
 
+def is_sector(symbol: str, stock_type: str | None = None) -> bool:
+    """判断是否为板块（行业/概念）。板块无固定代码规律，只能靠 stock_type 显式标注。"""
+    return stock_type == "sector"
+
+
 # ========== A 股数据采集 ==========
 
 def _symbol_to_baostock(symbol: str) -> str:
@@ -170,6 +175,31 @@ def _fetch_index(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+# ========== 板块数据采集 ==========
+
+def _fetch_sector(name: str, kind: str, start: str, end: str) -> pd.DataFrame:
+    """通过 AKShare 获取板块（行业/概念）指数日K线（数据源：同花顺 THS）
+
+    行业走 stock_board_industry_index_ths，概念走 stock_board_concept_index_ths，
+    均以板块中文名为 symbol。选 THS 而非东财：东财 push2his 常被限流连不上，
+    THS 走 10jqka 域名独立。返回结构与 _fetch_index 同构（OHLCV）。
+    """
+    import akshare as ak
+    if kind == "industry":
+        df = ak.stock_board_industry_index_ths(symbol=name, start_date=start, end_date=end)
+    else:
+        df = ak.stock_board_concept_index_ths(symbol=name, start_date=start, end_date=end)
+    col_map = {"日期": "date", "开盘价": "open", "收盘价": "close",
+               "最高价": "high", "最低价": "low", "成交量": "volume"}
+    df = df.rename(columns=col_map)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    core_cols = ["open", "close", "high", "low", "volume"]
+    df = df[[c for c in core_cols if c in df.columns]]
+    logger.info(f"  {name}({kind}): fetched {len(df)} rows via THS board index")
+    return df
+
+
 # ========== 统一入口 ==========
 
 def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type: str | None = None) -> pd.DataFrame:
@@ -185,7 +215,13 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
-    if is_index(symbol, stock_type):
+    if is_sector(symbol, stock_type):
+        from config.settings import get_sector_info
+        info = get_sector_info(symbol)
+        if not info:
+            raise ValueError(f"板块 {symbol} 缺少名称/类型配置，无法取数")
+        df = _fetch_sector(info[0], info[1], start, end)
+    elif is_index(symbol, stock_type):
         df = _fetch_index(symbol, start, end)
     elif is_hk_stock(symbol):
         df = _fetch_hk_stock(symbol, start, end)
@@ -213,6 +249,12 @@ def _today_bar_from_realtime(symbol: str, stock_type, today_date, columns) -> pd
     """收盘后用实时现价构造当日 K 线；非交易日快照（日期≠今日）或取价失败返回 None"""
     from data.realtime import get_realtime_quotes  # 延迟导入避免与 realtime 循环依赖
 
+    # 板块实时快照无可靠交易日字段，无法做"非交易日快照"校验；不合成当日 bar，
+    # 改由东财板块 EOD（_fetch_sector 收盘后即含当日）补齐。收盘到 EOD 发布的空窗期
+    # 缓存可能短暂判不新鲜而重抓，属性能问题而非数据错误。
+    if is_sector(symbol, stock_type):
+        return None
+
     rt_type = "index" if is_index(symbol, stock_type) else "stock"
     q = get_realtime_quotes([(symbol, rt_type)]).get((symbol, rt_type))
     if not q:
@@ -237,6 +279,9 @@ def _today_bar_from_realtime(symbol: str, stock_type, today_date, columns) -> pd
 
 def fetch_stock_info(symbol: str, stock_type: str | None = None) -> dict:
     """获取个股基本信息（板块类型）"""
+    if is_sector(symbol, stock_type):
+        return {"symbol": symbol, "board": "sector", "market": "A", "type": "sector"}
+
     if is_index(symbol, stock_type):
         return {"symbol": symbol, "board": "index", "market": "A", "type": "index"}
 

@@ -32,11 +32,22 @@ def get_stock_name(code: str, stock_type: str | None = None) -> str:
 
 
 def get_stock_type(code: str) -> str:
-    """根据代码获取类型（stock/index），默认 stock"""
+    """根据代码获取类型（stock/index/sector），默认 stock"""
     for s in load_stock_pool():
-        if s["code"] == code and s.get("type") == "index":
-            return "index"
+        if s["code"] == code and s.get("type") in ("index", "sector"):
+            return s["type"]
     return "stock"
+
+
+def get_sector_info(code: str) -> tuple[str, str] | None:
+    """板块代码 → (板块名称, sector_kind)；sector_kind 为 industry/concept。非板块返回 None。
+
+    _fetch_sector 需要板块中文名（akshare 取数 key）与 kind（决定行业/概念接口）。
+    """
+    for s in load_stock_pool():
+        if s["code"] == code and s.get("type") == "sector":
+            return s["name"], s.get("sector_kind", "industry")
+    return None
 
 
 def save_stock_pool(stocks: list[dict]):
@@ -45,14 +56,21 @@ def save_stock_pool(stocks: list[dict]):
         json.dump(stocks, f, ensure_ascii=False, indent=4)
 
 
-def add_stock(code: str, name: str, market: str = "A", stock_type: str = "stock"):
-    """添加股票到股票池"""
+def add_stock(code: str, name: str, market: str = "A", stock_type: str = "stock",
+              sector_kind: str | None = None):
+    """添加股票到股票池
+
+    sector_kind 仅 stock_type=="sector" 时使用（industry/concept），决定取数走行业还是概念接口。
+    """
     pool = load_stock_pool()
     if any(s["code"] == code and s.get("type", "stock") == stock_type for s in pool):
         return False  # 已存在
     entry = {"code": code, "name": name, "market": market}
     if stock_type == "index":
         entry["type"] = "index"
+    elif stock_type == "sector":
+        entry["type"] = "sector"
+        entry["sector_kind"] = sector_kind or "industry"
     pool.append(entry)
     save_stock_pool(pool)
     return True
@@ -114,6 +132,7 @@ LIMIT_RULES = {
     "gem": 0.20,           # 创业板 ±20% (300xxx)
     "star": 0.20,          # 科创板 ±20% (688xxx)
     "index": 0.20,         # 指数无涨跌停，设大值兜底
+    "sector": 0.20,        # 板块指数无涨跌停，设大值兜底
 }
 
 # ========== 信号源配置（单选模式）==========

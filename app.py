@@ -68,8 +68,13 @@ def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
 
     数据源全失败且无任何缓存时返回空 DataFrame，由调用方决定如何提示用户。
     """
-    # 指数用带 type 前缀的 cache key，避免和同代码个股冲突
-    cache_key = f"idx_{code}" if stock_type == "index" else code
+    # 指数/板块用带 type 前缀的 cache key，避免和同代码个股冲突
+    if stock_type == "index":
+        cache_key = f"idx_{code}"
+    elif stock_type == "sector":
+        cache_key = f"sec_{code}"
+    else:
+        cache_key = code
     if not force_refresh and is_cache_fresh(cache_key):
         df = load_kline(cache_key)
         # 缓存覆盖的"日期跨度"够长才直接返回；否则走刷新分支补足天数。
@@ -88,6 +93,15 @@ def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
     if df is not None and not df.empty:
         return df
     return pd.DataFrame()
+
+
+def _market_label(stype, market):
+    """类型/市场 → 概览分组标签：板块 / 指数 / 港股 / A股"""
+    if stype == "sector":
+        return "板块"
+    if stype == "index":
+        return "指数"
+    return "港股" if market == "HK" else "A股"
 
 
 def get_recommendation(decision):
@@ -144,21 +158,29 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
 
             from datetime import date as _date
             last = signal_df.iloc[-1]
-            if signal_df.index[-1].date() == _date.today() and len(signal_df) >= 2:
-                prev_close = round(float(signal_df.iloc[-2]["close"]), 2)
-                last_date = str(signal_df.index[-2].date())
-            else:
-                prev_close = round(float(last["close"]), 2)
+            if stype == "sector":
+                # 板块无腾讯实时行情，涨跌幅直接用 THS 日K最后两根收盘价算：
+                # 收盘后即当日真实涨跌；盘中尚无当日 bar 时反映上一交易日，略滞后但可接受。
+                cur_price = round(float(last["close"]), 2)
+                prev_close = round(float(signal_df.iloc[-2]["close"]), 2) if len(signal_df) >= 2 else cur_price
                 last_date = str(signal_df.index[-1].date())
-            rt = realtime.get((code, stype))
-            cur_price = round(float(rt["price"]), 2) if rt else prev_close
-            # 直接用现价/昨收算涨跌幅，避免非交易日 realtime 返回上一交易日快照导致
-            # "现价==昨收 但涨跌幅≠0" 的不一致
-            change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
-            market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
-            # 指数 PE 腾讯虽返回数值但口径不明，不展示
+                change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+            else:
+                if signal_df.index[-1].date() == _date.today() and len(signal_df) >= 2:
+                    prev_close = round(float(signal_df.iloc[-2]["close"]), 2)
+                    last_date = str(signal_df.index[-2].date())
+                else:
+                    prev_close = round(float(last["close"]), 2)
+                    last_date = str(signal_df.index[-1].date())
+                rt = realtime.get((code, stype))
+                cur_price = round(float(rt["price"]), 2) if rt else prev_close
+                # 直接用现价/昨收算涨跌幅，避免非交易日 realtime 返回上一交易日快照导致
+                # "现价==昨收 但涨跌幅≠0" 的不一致
+                change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+            market_label = _market_label(stype, market)
+            # 指数/板块 PE 无意义或口径不明，不展示
             pe_raw = rt.get("pe") if rt else None
-            if stype == "index" or pe_raw is None:
+            if stype in ("index", "sector") or pe_raw is None:
                 pe_val = "-"
             else:
                 pe_val = round(float(pe_raw), 2)
@@ -170,7 +192,7 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
                 "日期": last_date, "_code": code, "_type": stype,
             }
         except Exception:
-            market_label = "指数" if stype == "index" else ("港股" if market == "HK" else "A股")
+            market_label = _market_label(stype, market)
             src_cache[cache_id] = None
             meta_cache[cache_id] = {
                 "市场": market_label, "股票": f"{name}({code})",
@@ -282,15 +304,15 @@ def page_overview():
     result_df = pd.DataFrame(rows)
 
     # 分市场显示，每行带「查看详情」按钮
-    for market_label, market_key in [("指数", "指数"), ("A股", "A股"), ("港股", "港股")]:
+    for market_label, market_key in [("指数", "指数"), ("板块", "板块"), ("A股", "A股"), ("港股", "港股")]:
         market_df = result_df[result_df["市场"] == market_key]
         if market_df.empty:
             continue
 
         st.markdown(f"### {market_label}")
 
-        # 表头：盘中显示"当前价"，收盘后显示"收盘价"
-        is_trading = a_trading if market_key == "A股" else hk_trading
+        # 表头：盘中显示"当前价"，收盘后显示"收盘价"（板块跟随 A 股时段）
+        is_trading = hk_trading if market_key == "港股" else a_trading
         price_label = "当前价" if is_trading else "收盘价"
 
         # 昨收日期（从第一条数据取，所有股票同市场日期一样）
@@ -494,9 +516,9 @@ def page_news_list():
 
     st.title("📰 新闻列表")
 
-    # 侧边栏选股（范围 = 股票池；指数无新闻源，不列入）
+    # 侧边栏选股（范围 = 股票池；指数/板块无新闻源，不列入）
     stocks = load_stock_pool()
-    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") != "index"]
+    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") not in ("index", "sector")]
     hk_stocks = [s for s in stocks if s.get("market") == "HK"]
 
     # 从单股票页跳转过来：一次性预选那只股票（写入 widget state，后续可自由改）
@@ -563,7 +585,8 @@ def page_detail():
     # 侧边栏：按市场分组选股
     stocks = load_stock_pool()
     idx_stocks = [s for s in stocks if s.get("type") == "index"]
-    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") != "index"]
+    sector_stocks = [s for s in stocks if s.get("type") == "sector"]
+    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") not in ("index", "sector")]
     hk_stocks = [s for s in stocks if s.get("market") == "HK"]
 
     # 从 session_state 读取跳转过来的股票
@@ -573,18 +596,24 @@ def page_detail():
 
     # 判断预选股票所在市场
     default_market = "A股"
-    if preselected_type == "index":
+    if preselected_type == "sector":
+        default_market = "板块"
+    elif preselected_type == "index":
         default_market = "指数"
     elif preselected_code and is_hk_stock(preselected_code):
         default_market = "港股"
 
     market_tabs = ["A股", "港股"]
+    if sector_stocks:
+        market_tabs = ["板块"] + market_tabs
     if idx_stocks:
         market_tabs = ["指数"] + market_tabs
     market_tab = st.sidebar.radio("市场", market_tabs, horizontal=True,
                                    index=market_tabs.index(default_market) if default_market in market_tabs else 0)
     if market_tab == "指数":
         pool = idx_stocks
+    elif market_tab == "板块":
+        pool = sector_stocks
     elif market_tab == "港股":
         pool = hk_stocks
     else:
@@ -755,10 +784,10 @@ def page_detail():
         signal_val = float(last.get(src_col, 0) or 0)
         signal_color = "#e74c3c" if signal_val >= buy_th else "#27ae60" if signal_val <= sell_th else "#666"
 
-        # 市盈率（指数/缺值显示 -；负 PE 即亏损股，原样展示）
+        # 市盈率（指数/板块/缺值显示 -；负 PE 即亏损股，原样展示）
         rt_quote = get_realtime_quotes([(symbol, stype)]).get((symbol, stype))
         pe_raw = rt_quote.get("pe") if rt_quote else None
-        if stype == "index" or pe_raw is None:
+        if stype in ("index", "sector") or pe_raw is None:
             pe_text = "-"
         else:
             pe_text = f"{float(pe_raw):.2f}"
@@ -1028,10 +1057,11 @@ def page_manage():
         st.markdown("### 当前股票池")
 
         idx_pool = [s for s in pool if s.get("type") == "index"]
-        a_pool = [s for s in pool if s.get("market", "A") == "A" and s.get("type") != "index"]
+        sector_pool = [s for s in pool if s.get("type") == "sector"]
+        a_pool = [s for s in pool if s.get("market", "A") == "A" and s.get("type") not in ("index", "sector")]
         hk_pool = [s for s in pool if s.get("market") == "HK"]
 
-        for label, sub_pool in [("指数", idx_pool), ("A股", a_pool), ("港股", hk_pool)]:
+        for label, sub_pool in [("指数", idx_pool), ("板块", sector_pool), ("A股", a_pool), ("港股", hk_pool)]:
             if not sub_pool:
                 continue
             st.markdown(f"**{label}**（{len(sub_pool)} 只）")
@@ -1050,11 +1080,18 @@ def page_manage():
         new_code = add_cols[0].text_input("代码", placeholder="600519 或 00700", key="manual_code")
         new_name = add_cols[1].text_input("名称", placeholder="贵州茅台", key="manual_name")
         new_market = add_cols[2].selectbox("市场", ["A", "HK"], key="manual_market")
-        new_type = add_cols[3].selectbox("类型", ["stock", "index"], key="manual_type",
-                                          format_func=lambda x: "个股" if x == "stock" else "指数")
+        _type_labels = {"stock": "个股", "index": "指数", "sector": "板块"}
+        new_type = add_cols[3].selectbox("类型", ["stock", "index", "sector"], key="manual_type",
+                                          format_func=lambda x: _type_labels[x])
+        new_kind = None
+        if new_type == "sector":
+            new_kind = st.selectbox("板块类型", ["industry", "concept"], key="manual_kind",
+                                    format_func=lambda x: "行业板块" if x == "industry" else "概念板块")
+            st.caption("板块「代码」填同花顺板块代码（行业如 881121、概念如 300733），「名称」填板块全名（akshare 取数 key）。建议用右侧「添加板块」选择。")
         if add_cols[4].button("添加", key="manual_add"):
             if new_code and new_name:
-                if add_stock(new_code.strip(), new_name.strip(), new_market, stock_type=new_type):
+                if add_stock(new_code.strip(), new_name.strip(), new_market,
+                             stock_type=new_type, sector_kind=new_kind):
                     st.rerun()
                 else:
                     st.warning(f"{new_code} 已在股票池中")
@@ -1106,6 +1143,46 @@ def page_manage():
         else:
             st.info("输入关键词搜索 A 股（约 5200 只）或港股（30 只热门），回车确认。")
 
+        # ---- 板块选择器（东财行业/概念板块全量列表，下拉直接选）----
+        st.markdown("---")
+        st.markdown("### 添加板块")
+        from data.sector_list import get_sector_list
+
+        sec_cols = st.columns([3, 1])
+        kind_label = {"industry": "行业", "concept": "概念"}
+        kind = sec_cols[0].radio("板块类型", ["industry", "concept"], horizontal=True,
+                                 format_func=lambda k: kind_label[k] + "板块", key="sec_kind_filter")
+        force_sec = sec_cols[1].button("刷新列表", key="refresh_sectors")
+
+        all_sectors = get_sector_list(force_refresh=force_sec)
+        subset = [s for s in all_sectors if s["kind"] == kind]
+
+        if not all_sectors:
+            st.info("板块列表暂不可用：需从东方财富拉取板块清单（首次约 10 秒），接口异常时为空。"
+                    "点「刷新列表」重试，或等东财恢复后再试。")
+        elif not subset:
+            st.info(f"暂无{kind_label[kind]}板块数据，点「刷新列表」重试。")
+        else:
+            in_pool_codes = {p["code"] for p in pool if p.get("type") == "sector"}
+            st.caption(f"{kind_label[kind]}板块共 {len(subset)} 个（下拉框可输入关键字过滤）")
+            options = {f"{s['name']}（{s['code']}）": s for s in subset}
+            pick_cols = st.columns([3, 1])
+            chosen = pick_cols[0].selectbox("选择板块", list(options.keys()), key="sector_pick")
+            s = options[chosen]
+            if s["code"] in in_pool_codes:
+                pick_cols[1].markdown('<span style="color:#27ae60">✓ 已添加</span>', unsafe_allow_html=True)
+            elif pick_cols[1].button("添加", key="add_picked_sector"):
+                add_stock(s["code"], s["name"], "A", stock_type="sector", sector_kind=s["kind"])
+                st.rerun()
+
+            # 全量清单（可滚动浏览，不知道名字时直接翻）
+            with st.expander(f"展开浏览全部 {kind_label[kind]}板块清单"):
+                st.dataframe(
+                    pd.DataFrame([{"名称": x["name"], "代码": x["code"]} for x in subset]),
+                    use_container_width=True, hide_index=True,
+                )
+        st.caption("板块来自东方财富行业/概念板块。添加后出现在概览页「板块」分类，可点详情做信号/回测分析。")
+
 
 # ========== 自定义策略页 ==========
 
@@ -1154,15 +1231,20 @@ def page_custom_strategy():
     # ---- 侧边栏：选股 + 信号源（建仓触发）----
     stocks = load_stock_pool()
     idx_stocks = [s for s in stocks if s.get("type") == "index"]
-    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") != "index"]
+    sector_stocks = [s for s in stocks if s.get("type") == "sector"]
+    a_stocks = [s for s in stocks if s.get("market", "A") == "A" and s.get("type") not in ("index", "sector")]
     hk_stocks = [s for s in stocks if s.get("market") == "HK"]
 
     market_tabs = ["A股", "港股"]
+    if sector_stocks:
+        market_tabs = ["板块"] + market_tabs
     if idx_stocks:
         market_tabs = ["指数"] + market_tabs
     market_tab = st.sidebar.radio("市场", market_tabs, horizontal=True, key="cs_market")
     if market_tab == "指数":
         pool = idx_stocks
+    elif market_tab == "板块":
+        pool = sector_stocks
     elif market_tab == "港股":
         pool = hk_stocks
     else:
