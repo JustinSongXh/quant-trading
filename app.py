@@ -1426,9 +1426,134 @@ def page_custom_strategy():
         st.info("回测期间无交易发生（信号源未触发建仓，或策略未满足进出仓条件）。")
 
 
+def page_sector_correlation():
+    """板块相关性分析：热力图 + 单板块联动榜 + 负相关对冲榜（#29）"""
+    from analysis.correlation import (
+        corr_matrix, linkage_ranking, hedge_pairs, cluster_order, VALID_WINDOWS,
+    )
+
+    st.title("板块相关性")
+    st.caption("对一组板块的日收益率两两算相关系数：谁同涨同跌（正相关抱团）、谁反向（负相关可对冲/轮动）。")
+
+    stocks = load_stock_pool()
+    pool_sectors = [s for s in stocks if s.get("type") == "sector"]
+    if not pool_sectors:
+        st.info("股票池里还没有板块。请到「股票池管理」页添加行业/概念板块后再来分析。")
+        return
+
+    # 默认分析股票池内的板块；可从全量板块补充加入本次分析（仅本次，不入池）
+    name_by_code = {s["code"]: s["name"] for s in pool_sectors}
+    default_codes = list(name_by_code.keys())
+
+    extra_codes = []
+    with st.expander("＋ 从全量板块加入本次分析（仅本次，不写入股票池）"):
+        from data.sector_list import get_sector_list, sector_list_available
+        if not sector_list_available():
+            st.caption("尚无板块列表缓存，去「股票池管理」页刷新一次板块列表即可。")
+        else:
+            all_sectors = get_sector_list()
+            # 排除已在池里的，避免重复
+            extra_opts = {f"{s['name']}({s['code']}·{'行业' if s['kind']=='industry' else '概念'})": s["code"]
+                          for s in all_sectors if s["code"] not in name_by_code}
+            picked = st.multiselect("追加板块", list(extra_opts.keys()), key="corr_extra")
+            for label in picked:
+                code = extra_opts[label]
+                extra_codes.append(code)
+                # 补进名称映射（get_stock_name 只认池里的，这里给列名兜底）
+                name_by_code.setdefault(code, label.split("(")[0])
+
+    all_codes = default_codes + extra_codes
+
+    sel_labels = st.multiselect(
+        "参与分析的板块",
+        [f"{name_by_code[c]}({c})" for c in all_codes],
+        default=[f"{name_by_code[c]}({c})" for c in default_codes],
+        key="corr_selected",
+    )
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        window = st.radio("窗口（交易日）", VALID_WINDOWS, index=1, horizontal=True, key="corr_window")
+    with c2:
+        method_label = st.selectbox("方法", ["Pearson", "Spearman（抗异常）"], key="corr_method")
+    with c3:
+        mode_label = st.radio(
+            "相关模式",
+            ["原始相关", "剔除大盘（沪深300）", "剔除板块均值"],
+            index=0, horizontal=True, key="corr_mode",
+            help="原始相关被大盘 beta 主导（成长赛道普遍偏高）；剔除大盘/板块均值后看板块特异关系，"
+                 "才能暴露真实的轮动主线和对冲对。",
+        )
+    method = "spearman" if method_label.startswith("Spearman") else "pearson"
+    mode = {"原始相关": "raw", "剔除大盘（沪深300）": "index", "剔除板块均值": "cross"}[mode_label]
+
+    label_to_code = {f"{name_by_code[c]}({c})": c for c in all_codes}
+    sel_codes = [label_to_code[l] for l in sel_labels if l in label_to_code]
+
+    if len(sel_codes) < 2:
+        st.info("请至少选择 2 个板块。")
+        return
+
+    with st.spinner("计算中（首次取数可能较慢）…"):
+        mat = corr_matrix(sel_codes, window=window, method=method, mode=mode)
+
+    if mat.empty:
+        st.warning("参与板块的收益率数据不足或对齐后无重叠交易日，换更短窗口或减少停牌/新板块再试。")
+        return
+
+    tab_heat, tab_link, tab_hedge = st.tabs(["相关性热力图", "单板块联动榜", "负相关对冲榜"])
+
+    with tab_heat:
+        order = cluster_order(mat)
+        m = mat.loc[order, order]
+        fig = go.Figure(data=go.Heatmap(
+            z=m.values, x=list(m.columns), y=list(m.index),
+            zmin=-1, zmax=1,
+            colorscale=[[0.0, "#2e8b57"], [0.5, "#f5f5f5"], [1.0, "#c0392b"]],  # 负绿 中灰 正红
+            colorbar=dict(title="相关系数"),
+            text=m.round(2).values, texttemplate="%{text}", textfont={"size": 10},
+            hovertemplate="%{y} × %{x}<br>相关系数=%{z:.3f}<extra></extra>",
+        ))
+        n = len(order)
+        fig.update_layout(height=max(400, 34 * n + 160), xaxis=dict(side="bottom"),
+                          yaxis=dict(autorange="reversed"), margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"红=正相关（同涨跌），绿=负相关（反向）。窗口 {window} 交易日，{method_label}，{mode_label}。"
+                   + ("板块 ≥3 已按层次聚类重排，抱团板块相邻。" if n >= 3 else "")
+                   + ("　【原始相关被大盘主导，成长赛道普遍偏红；想看真实轮动/对冲请切「剔除大盘」】" if mode == "raw" else ""))
+
+    with tab_link:
+        target_label = st.selectbox("选择板块", sel_labels, key="corr_link_target")
+        target_code = label_to_code.get(target_label)
+        rk = linkage_ranking(target_code, sel_codes, window=window, top_n=5, method=method, mode=mode)
+        col_pos, col_neg = st.columns(2)
+        with col_pos:
+            st.markdown(f"**与「{rk['target']}」最正相关 Top5**")
+            if rk["positive"]:
+                st.dataframe(pd.DataFrame(rk["positive"], columns=["板块", "相关系数"])
+                             .style.format({"相关系数": "{:.3f}"}), hide_index=True, use_container_width=True)
+            else:
+                st.caption("无数据")
+        with col_neg:
+            st.markdown(f"**与「{rk['target']}」最负相关 Top5**")
+            if rk["negative"]:
+                st.dataframe(pd.DataFrame(rk["negative"], columns=["板块", "相关系数"])
+                             .style.format({"相关系数": "{:.3f}"}), hide_index=True, use_container_width=True)
+            else:
+                st.caption("无数据")
+
+    with tab_hedge:
+        st.markdown("**全局相关系数最低的板块对（越负越可能对冲/轮动）**")
+        pairs = hedge_pairs(sel_codes, window=window, top_n=15, method=method, mode=mode)
+        if pairs:
+            st.dataframe(pd.DataFrame(pairs, columns=["板块 A", "板块 B", "相关系数"])
+                         .style.format({"相关系数": "{:.3f}"}), hide_index=True, use_container_width=True)
+        else:
+            st.caption("无数据")
+
+
 # ========== 页面路由 ==========
 
-pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "自定义策略"]
+pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块相关性", "自定义策略"]
 default_page = st.session_state.get("page", "全局信号总览")
 default_idx = pages.index(default_page) if default_page in pages else 0
 
@@ -1443,5 +1568,7 @@ elif page == "新闻列表":
     page_news_list()
 elif page == "股票池管理":
     page_manage()
+elif page == "板块相关性":
+    page_sector_correlation()
 else:
     page_custom_strategy()
