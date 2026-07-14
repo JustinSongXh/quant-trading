@@ -200,6 +200,65 @@ def _fetch_sector(name: str, kind: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+def _market_traded_today(today_date) -> bool:
+    """今天 A 股是否已开盘（交易日闸门）。
+
+    THS 实时板块快照没有可靠日期字段，工作日节假日会返回上一交易日快照，误当今日会
+    造出幻影 bar 污染日 K/回测。用腾讯上证指数（000001）实时快照的交易日期做闸门：
+    仅当其 date==今日（今天确实开过盘）才允许补当日 bar。取价失败按"未开盘"处理（宁缺勿错）。
+    """
+    from data.realtime import get_realtime_quotes  # 延迟导入避免循环依赖
+    q = get_realtime_quotes([("000001", "index")]).get(("000001", "index"))
+    return bool(q) and q.get("date") == today_date.isoformat()
+
+
+def _today_sector_bar_from_ths(name: str, kind: str, today_date, columns) -> pd.DataFrame | None:
+    """收盘后 THS 板块 EOD 未发布时，用 THS 实时板块快照补一根当日 bar。
+
+    数据源：行业 stock_board_industry_info_ths / 概念 stock_board_concept_info_ths，
+    返回「项目/值」表，含 今开/昨收/最高/最低/成交量(万手)/板块涨幅。点位与 EOD 同标度。
+    当日收盘 = 昨收 × (1 + 板块涨幅/100)，OHLC 与量取自快照。
+    非交易日（指数闸门未过）/取数失败/字段缺失 → None（不合成，回到板块滞后一天的现状）。
+    """
+    if not _market_traded_today(today_date):
+        return None
+    import akshare as ak
+    try:
+        fn = ak.stock_board_industry_info_ths if kind == "industry" else ak.stock_board_concept_info_ths
+        raw = fn(symbol=name)
+        kv = dict(zip(raw["项目"], raw["值"]))
+    except Exception as e:
+        logger.warning(f"THS 板块实时快照失败 {name}({kind}): {e}")
+        return None
+
+    prev_close = _safe_num(kv.get("昨收"))
+    pct = _safe_num(str(kv.get("板块涨幅", "")).replace("%", ""))
+    if prev_close is None or pct is None:
+        logger.warning(f"THS 板块实时快照缺字段 {name}({kind}): {kv}")
+        return None
+    close = round(prev_close * (1 + pct / 100), 3)
+    vol_wan = _safe_num(kv.get("成交量(万手)"))
+    row = {
+        "open": _safe_num(kv.get("今开")) or close,
+        "high": _safe_num(kv.get("最高")) or close,
+        "low": _safe_num(kv.get("最低")) or close,
+        "close": close,
+        "volume": round(vol_wan * 10000) if vol_wan is not None else 0,
+    }
+    cols = list(columns) if len(columns) else list(row.keys())
+    data = {c: row.get(c) for c in cols}
+    logger.info(f"  {name}({kind}): 补当日 bar close={close} ({pct:+.2f}%) via THS 实时快照")
+    idx = pd.Index([pd.Timestamp(today_date)], name="date")
+    return pd.DataFrame([data], index=idx)
+
+
+def _safe_num(s):
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
 # ========== 统一入口 ==========
 
 def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type: str | None = None) -> pd.DataFrame:
@@ -215,12 +274,13 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
+    sector_info = None
     if is_sector(symbol, stock_type):
         from config.settings import get_sector_info
-        info = get_sector_info(symbol)
-        if not info:
+        sector_info = get_sector_info(symbol)
+        if not sector_info:
             raise ValueError(f"板块 {symbol} 缺少名称/类型配置，无法取数")
-        df = _fetch_sector(info[0], info[1], start, end)
+        df = _fetch_sector(sector_info[0], sector_info[1], start, end)
     elif is_index(symbol, stock_type):
         df = _fetch_index(symbol, start, end)
     elif is_hk_stock(symbol):
@@ -235,9 +295,12 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type
     if now.weekday() < 5 and now.time() < close_time:
         df = df[df.index < today]
     elif now.weekday() < 5 and now.time() >= close_time and (df.empty or df.index.max() < today):
-        # 收盘后，数据源当日 EOD 往往尚未发布（baostock 傍晚才更新）：
+        # 收盘后，数据源当日 EOD 往往尚未发布（baostock 傍晚才更新；THS 板块指数傍晚才出当日 bar）：
         # 用实时现价补一根当日 bar，避免 is_cache_fresh 因缺当日 bar 而永远不新鲜、反复重抓。
-        bar = _today_bar_from_realtime(symbol, stock_type, now.date(), df.columns)
+        if sector_info is not None:
+            bar = _today_sector_bar_from_ths(sector_info[0], sector_info[1], now.date(), df.columns)
+        else:
+            bar = _today_bar_from_realtime(symbol, stock_type, now.date(), df.columns)
         if bar is not None:
             df = pd.concat([df, bar]).sort_index()
             df = df[~df.index.duplicated(keep="last")]
@@ -249,12 +312,8 @@ def _today_bar_from_realtime(symbol: str, stock_type, today_date, columns) -> pd
     """收盘后用实时现价构造当日 K 线；非交易日快照（日期≠今日）或取价失败返回 None"""
     from data.realtime import get_realtime_quotes  # 延迟导入避免与 realtime 循环依赖
 
-    # 板块实时快照无可靠交易日字段，无法做"非交易日快照"校验；不合成当日 bar，
-    # 改由东财板块 EOD（_fetch_sector 收盘后即含当日）补齐。收盘到 EOD 发布的空窗期
-    # 缓存可能短暂判不新鲜而重抓，属性能问题而非数据错误。
-    if is_sector(symbol, stock_type):
-        return None
-
+    # 板块不走这里：THS 实时板块快照无日期字段，由 _today_sector_bar_from_ths 单独处理
+    # （fetch_daily_kline 已按 sector_info 分流）。
     rt_type = "index" if is_index(symbol, stock_type) else "stock"
     q = get_realtime_quotes([(symbol, rt_type)]).get((symbol, rt_type))
     if not q:
@@ -274,7 +333,8 @@ def _today_bar_from_realtime(symbol: str, stock_type, today_date, columns) -> pd
     }
     cols = list(columns) if len(columns) else list(row.keys())
     data = {c: row.get(c) for c in cols}
-    return pd.DataFrame([data], index=[pd.Timestamp(today_date)])
+    idx = pd.Index([pd.Timestamp(today_date)], name="date")
+    return pd.DataFrame([data], index=idx)
 
 
 def fetch_stock_info(symbol: str, stock_type: str | None = None) -> dict:
