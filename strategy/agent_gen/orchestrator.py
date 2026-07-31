@@ -86,6 +86,51 @@ class GenState:
         """现在是否该显示输入框"""
         return self.status in (NEW, ASKING, STUCK)
 
+    # ---------- 序列化 ----------
+    # advance() 跑在独立进程里（见 runner.py），状态要能过 JSON。
+    # 不用 pickle：跨进程传 pickle 等于给子进程的输出开一条反序列化执行的路，
+    # 而那个子进程正在处理模型生成的内容。
+
+    def to_dict(self) -> dict:
+        return {
+            "provider_key": self.provider_key,
+            "provider_params": self.provider_params,
+            "run_id": self.run_id,
+            "session": self.session,
+            "messages": [{"role": m.role, "text": m.text} for m in self.messages],
+            "fixes": [{"gate": f.gate, "reason": f.reason, "detail": f.detail}
+                      for f in self.fixes],
+            "asks": self.asks,
+            "status": self.status,
+            "key": self.key,
+            "code": self.code,
+            "smoke_result": (None if self.smoke_result is None else {
+                "ok": self.smoke_result.ok,
+                "error": self.smoke_result.error,
+                "detail": self.smoke_result.detail,
+                "cases": self.smoke_result.cases,
+            }),
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GenState":
+        sr = d.get("smoke_result")
+        return cls(
+            provider_key=d["provider_key"],
+            provider_params=d.get("provider_params") or {},
+            run_id=d["run_id"],
+            session=d.get("session") or {},
+            messages=[Message(**m) for m in d.get("messages", [])],
+            fixes=[FixAttempt(**f) for f in d.get("fixes", [])],
+            asks=d.get("asks", 0),
+            status=d.get("status", NEW),
+            key=d.get("key"),
+            code=d.get("code"),
+            smoke_result=None if sr is None else smoke.SmokeResult(**sr),
+            error=d.get("error", ""),
+        )
+
 
 def new_state(provider_key: str, **provider_params) -> GenState:
     return GenState(provider_key=provider_key, provider_params=provider_params)
