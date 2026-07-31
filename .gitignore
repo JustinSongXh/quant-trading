@@ -19,9 +19,14 @@ env/
 *.swp
 *.swo
 
-# Data cache
-data/cache/*.db
-data/cache/*.duckdb
+# Data cache（DuckDB + 股票/板块 json 快照，均为本地产物）
+data/cache/
+
+# HuggingFace 模型权重缓存（Kronos，挂卷到容器 /root/.cache/huggingface）
+data/hf_cache/
+
+# 第三方 Kronos 仓库 clone（自带 .git，误 add 会变成嵌套仓库）
+tests/kronos_repo/
 
 # Environment & secrets
 .env
