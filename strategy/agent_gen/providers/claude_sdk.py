@@ -23,8 +23,23 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CREDENTIALS = Path("/root/.claude/.credentials.json")
 
-# 只读工具。写操作一律不给——provider 不碰文件系统，落盘由 orchestrator 经 store 做。
-READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
+# 允许的只读工具。写操作一律不给——provider 不碰文件系统，落盘由 orchestrator 经
+# store 做。注意这三个**不放进 allowed_tools**：allowed_tools 里的工具会在
+# can_use_tool 之前被自动放行，那样 Read 就对任意绝对路径畅通了。实测能读到
+# /etc/hostname，也就意味着能读容器里挂着的 /root/.claude（凭证 + 宿主 5 个项目的
+# 会话记录）。所以让回调成为唯一关卡，在这里逐次校验路径。
+READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
+
+# 各工具里代表路径的入参名。Read 用 file_path，Grep/Glob 用 path（可省略，
+# 省略时以 cwd 为根，也就是仓库本身）。
+PATH_ARGS = ("file_path", "path", "notebook_path")
+
+# 仓库内也不给读的：都是不进 git 的本机/个人配置
+DENIED_IN_REPO = (
+    ".env",              # PUSHPLUS_TOKEN / ANTHROPIC_API_KEY
+    "config/stocks.json",  # 个人自选股
+    ".claude",           # 本机 Claude Code 配置与权限规则
+)
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_EFFORT = "high"
@@ -103,8 +118,9 @@ class ClaudeSdkProvider(CodegenProvider):
                 "preset": "claude_code",
                 "append": build_system_prompt(),
             },
-            allowed_tools=READ_ONLY_TOOLS,
-            can_use_tool=_deny_all_writes,
+            # 刻意留空：任何工具调用都必须过 can_use_tool，没有旁路
+            allowed_tools=[],
+            can_use_tool=_gate_tools,
             # 闸门 1 的关键一环：不加载任何本地 settings。
             # setting_sources=None（默认）会读 ~/.claude/settings.json 与
             # <cwd>/.claude/settings.local.json —— 本仓库那份就带着
@@ -123,6 +139,14 @@ class ClaudeSdkProvider(CodegenProvider):
         # 流式 prompt：can_use_tool 回调要求 streaming mode，字符串 prompt 会直接
         # ValueError（claude_agent_sdk/_internal/client.py:105）。单条消息也得包成
         # async generator。
+        #
+        # yield 完必须挂住不返回：生成器一结束，SDK 就关掉 stdin，而 can_use_tool 的
+        # 控制请求是 CLI 反向发来、要走这条通道应答的。关早了模型侧只会看到
+        # "Tool permission request failed: AbortError: Stream closed"——工具确实没跑成，
+        # 但那是通道断了导致的被动拒绝，不是闸门在把关（回调压根没被调用）。
+        # 整轮结束后 async for 退出，生成器随之被关闭回收。
+        stay_open = asyncio.Event()
+
         async def prompt_stream():
             yield {
                 "type": "user",
@@ -130,49 +154,96 @@ class ClaudeSdkProvider(CodegenProvider):
                 "parent_tool_use_id": None,
                 "session_id": session_id or "",
             }
+            await stay_open.wait()
 
-        async for message in query(prompt=prompt_stream(), options=options):
-            if isinstance(message, AssistantMessage):
-                if message.error:
-                    error = _readable_error(message.error)
+        try:
+            async for message in query(prompt=prompt_stream(), options=options):
+                if isinstance(message, AssistantMessage):
+                    if message.error:
+                        error = _readable_error(message.error)
+                        break
+                    for block in message.content:
+                        if isinstance(block, TextBlock) and block.text.strip():
+                            texts.append(block.text)
+                    if message.session_id:
+                        new_session_id = message.session_id
+                elif isinstance(message, ResultMessage):
+                    new_session_id = message.session_id or new_session_id
+                    if message.is_error:
+                        error = _readable_error(message.subtype, message.errors)
+                    # 一轮到此结束，必须主动 break：streaming 输入模式下 CLI 认为
+                    # 会话还可能继续，发完 ResultMessage 也不退出，不 break 就会
+                    # 一直挂在 async for 上（配合上面挂住的生成器直接死等）。
                     break
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text.strip():
-                        texts.append(block.text)
-                if message.session_id:
-                    new_session_id = message.session_id
-            elif isinstance(message, ResultMessage):
-                new_session_id = message.session_id or new_session_id
-                if message.is_error:
-                    error = _readable_error(message.subtype, message.errors)
+        finally:
+            stay_open.set()   # 放开挂住的生成器，让它正常收尾
 
         if not texts and not error:
             error = "模型没有返回任何文本（可能已达 max_turns 或被中断）"
         return texts, new_session_id, error
 
 
-async def _deny_all_writes(tool_name: str, tool_input: dict, context) -> object:
-    """闸门 1：拒绝一切非只读工具。
+def check_tool(tool_name: str, tool_input: dict) -> str | None:
+    """闸门 1 的判定逻辑：放行返回 None，拒绝返回给模型看的原因。
 
-    provider 只返回代码文本，落盘全部由 store.py 做，路径由我们拼。所以这里不需要
-    路径白名单——直接拒绝写操作，攻击面最小。
+    单独抽出来是为了能不起模型直接单测（见 tests/test_codegen_permission.py）。
 
-    注意 allowed_tools 里的工具（Read/Grep/Glob）会在本回调之前被自动放行，
-    因此这里实际只会收到白名单外的调用。这正是想要的分工，SDK 会为此发一条
-    CanUseToolShadowedWarning（见 _install_warning_filter）。
+    两条规则：
+    1. 只有 Read / Grep / Glob 三个只读工具可用，其余（Write/Edit/Bash/WebFetch…）全拒
+    2. 这三个的路径参数必须落在本仓库内，且不在 DENIED_IN_REPO 里
+
+    第 2 条是必需的：容器挂了宿主的 /root/.claude，里面是 OAuth 凭证和 5 个项目的
+    Claude Code 会话记录。不限路径的话，一句「读一下那个文件」就能把它们打进聊天框。
     """
+    if tool_name not in READ_ONLY_TOOLS:
+        return (f"不允许使用 {tool_name}。你只有 Read / Grep / Glob 三个只读工具。"
+                "策略代码请写在回复正文的 python 代码块里交付，"
+                "不要尝试写文件或执行命令。")
+
+    for arg in PATH_ARGS:
+        raw = tool_input.get(arg)
+        if raw in (None, ""):
+            continue          # Grep/Glob 省略 path 时以 cwd（仓库）为根，放行
+        reason = _check_path(str(raw))
+        if reason is not None:
+            return reason
+    return None
+
+
+def _check_path(raw: str) -> str | None:
+    """路径必须解析后仍在仓库内。resolve() 会展开 .. 与符号链接，
+    所以 `../../etc/passwd` 和「仓库里指向外面的软链」都会被拦下。"""
+    try:
+        target = Path(raw)
+        if not target.is_absolute():
+            target = REPO_ROOT / target
+        target = target.resolve()
+    except (OSError, RuntimeError) as e:
+        return f"路径 {raw} 无法解析（{type(e).__name__}），已拒绝。"
+
+    if not (target == REPO_ROOT or target.is_relative_to(REPO_ROOT)):
+        return (f"不允许访问仓库之外的路径（{raw}）。你只能读 {REPO_ROOT} 里的文件——"
+                "本机还挂载着与本任务无关的私有数据。")
+
+    rel = target.relative_to(REPO_ROOT).as_posix() if target != REPO_ROOT else ""
+    for denied in DENIED_IN_REPO:
+        if rel == denied or rel.startswith(denied + "/"):
+            return (f"不允许访问 {rel}（本机/个人配置，与生成策略无关）。"
+                    "策略契约所需的接口在 strategy/trade_strategy.py 和 backtest/broker.py 里。")
+    return None
+
+
+async def _gate_tools(tool_name: str, tool_input: dict, context) -> object:
+    """闸门 1：唯一的工具关卡（allowed_tools 留空，没有旁路）"""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-    if tool_name in READ_ONLY_TOOLS:
+    reason = check_tool(tool_name, tool_input)
+    if reason is None:
         return PermissionResultAllow()
 
-    logger.info("闸门1 拒绝工具调用：%s(%s)", tool_name, json.dumps(tool_input)[:120])
-    return PermissionResultDeny(
-        message=(
-            f"不允许使用 {tool_name}。你只有 Read / Grep / Glob 三个只读工具。"
-            "策略代码请写在回复正文的 python 代码块里交付，不要尝试写文件或执行命令。"
-        )
-    )
+    logger.warning("闸门1 拒绝 %s(%s)：%s",
+                   tool_name, json.dumps(tool_input, ensure_ascii=False)[:150], reason)
+    return PermissionResultDeny(message=reason)
 
 
 def _readable_error(kind: str, details: list[str] | None = None) -> str:
@@ -194,20 +265,7 @@ def _readable_error(kind: str, details: list[str] | None = None) -> str:
     return msg
 
 
-def _install_warning_filter() -> None:
-    """静音 CanUseToolShadowedWarning。
-
-    allowed_tools 列了 Read/Grep/Glob，SDK 会提醒「这三个不会走 can_use_tool」——
-    对我们是有意设计（只读走快路径，回调兜住其余），不是配置失误。不静音会在
-    Streamlit 日志里反复刷。
-    """
-    import warnings
-
-    try:
-        from claude_agent_sdk import CanUseToolShadowedWarning
-    except ImportError:
-        return
-    warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
-
-
-_install_warning_filter()
+# 曾经这里有个 CanUseToolShadowedWarning 的静音 filter：当时 allowed_tools 列了
+# Read/Grep/Glob，SDK 会提醒「这三个不走 can_use_tool」，我把它当成有意设计静音掉了。
+# 那条警告是对的——它正是「Read 对任意路径畅通」这个洞的提示。现在 allowed_tools
+# 留空、回调是唯一关卡，警告不再产生，filter 也就不需要了。
