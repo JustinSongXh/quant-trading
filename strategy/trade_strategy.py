@@ -9,8 +9,16 @@
 T+1 / 涨跌停等成交约束复用 broker 自身规则。
 """
 
+import importlib
+import logging
+import re
+import threading
 from dataclasses import dataclass
+from pathlib import Path
+
 from config.settings import POSITION_SIZING
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -260,11 +268,99 @@ class PlayDeadQuarterStrategy(TradeStrategy):
 
 
 # ========== 注册表 ==========
-_REGISTRY = {
+_BUILTIN = {
     DefaultStrengthStrategy.key: DefaultStrengthStrategy,
     PlayDeadQuarterStrategy.key: PlayDeadQuarterStrategy,
 }
 DEFAULT_TRADE_STRATEGY = DefaultStrengthStrategy.key
+
+_CUSTOM_DIR = Path(__file__).parent / "custom"
+_registry_cache: dict | None = None
+
+# 策略 key 的合法字面量：小写开头、下划线/数字，3~32 字符。
+# key 同时是模块名与文件名，故不允许出现路径分隔符等任何特殊字符。
+KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+
+# 串行化注册表读写：Streamlit 每次 rerun 在独立线程执行，并发 refresh 会在
+# importlib.reload() 重新执行模块体的同时被另一线程读 vars(module)（#27 同类竞态）。
+# 用 RLock 而非 Lock：store.promote() 已持锁时会再调 refresh_registry()。
+_registry_lock = threading.RLock()
+
+
+def _discover_custom() -> dict:
+    """扫 strategy/custom/*.py，收集其中的 TradeStrategy 子类。
+
+    只扫顶层非下划线开头的 .py（_staging/ 和 _rejected/ 因此被天然排除）。
+    单个文件出错只记 warning 并跳过——一个坏策略不能拖垮整站启动。
+    """
+    found = {}
+    if not _CUSTOM_DIR.is_dir():
+        return found
+
+    for path in sorted(_CUSTOM_DIR.glob("*.py")):
+        stem = path.stem
+        if stem.startswith("_"):
+            continue
+        try:
+            module = importlib.import_module(f"strategy.custom.{stem}")
+            importlib.reload(module)  # 保存后立即生效，无需重启进程
+            classes = [
+                obj for obj in vars(module).values()
+                if isinstance(obj, type) and issubclass(obj, TradeStrategy)
+                and obj is not TradeStrategy and obj.__module__ == module.__name__
+            ]
+            if len(classes) != 1:
+                raise ValueError(f"应恰好包含 1 个 TradeStrategy 子类，实际 {len(classes)} 个")
+            cls = classes[0]
+            if cls.key != stem:
+                raise ValueError(f"key={cls.key!r} 与文件名 {stem!r} 不一致")
+            if cls.key in _BUILTIN:
+                raise ValueError(f"key={cls.key!r} 与内置策略冲突")
+            found[cls.key] = cls
+        except Exception as e:
+            logger.warning("跳过自定义策略 %s：%s: %s", path.name, type(e).__name__, e)
+
+    return found
+
+
+def _registry() -> dict:
+    """惰性构建注册表（内置 + 自动发现），结果缓存。
+
+    惰性而非模块级常量：一是避免 strategy/custom/*.py 反向 import 本模块造成循环
+    导入，二是保存新策略后可用 refresh_registry() 立即生效。
+    """
+    global _registry_cache
+    if _registry_cache is None:
+        with _registry_lock:
+            if _registry_cache is None:  # 双重检查：等锁期间可能已被别的线程建好
+                _registry_cache = {**_BUILTIN, **_discover_custom()}
+    return _registry_cache
+
+
+def refresh_registry() -> dict:
+    """重新发现并替换缓存。新策略落盘后调用，使其立刻可选。
+
+    先建好完整的新 dict 再整体赋值，不先置 None——否则重建期间的读者会看到
+    None 并触发第二次并发重建（reload 期间读 vars(module) 正是 #27 那类竞态）。
+    """
+    global _registry_cache
+    with _registry_lock:
+        _registry_cache = {**_BUILTIN, **_discover_custom()}
+        return _registry_cache
+
+
+def taken_keys() -> set[str]:
+    """当前已被占用的 key：内置 + custom/ 下所有 .py 文件名。
+
+    按文件名而非注册表统计——坏文件不会被注册，但它占着 custom/<key>.py 这个
+    路径，promote 过去就会覆盖它。闸门 2 与 store.promote() 都据此判重。
+    """
+    with _registry_lock:
+        keys = set(_BUILTIN)
+        if _CUSTOM_DIR.is_dir():
+            keys |= {p.stem for p in _CUSTOM_DIR.glob("*.py")
+                     if not p.stem.startswith("_")}
+        return keys
 
 
 def list_trade_strategies(custom_only: bool = False) -> list[dict]:
@@ -274,7 +370,7 @@ def list_trade_strategies(custom_only: bool = False) -> list[dict]:
         custom_only: 仅返回自定义策略（custom=True），用于「自定义策略」页
     """
     out = []
-    for key, cls in _REGISTRY.items():
+    for key, cls in _registry().items():
         inst = cls()
         if custom_only and not inst.custom:
             continue
@@ -290,6 +386,7 @@ def list_trade_strategies(custom_only: bool = False) -> list[dict]:
 
 def get_trade_strategy(key: str, **params) -> TradeStrategy:
     """按 key 构造交易策略实例，params 透传给构造函数"""
-    if key not in _REGISTRY:
+    registry = _registry()
+    if key not in registry:
         raise ValueError(f"unknown trade strategy: {key}")
-    return _REGISTRY[key](**params)
+    return registry[key](**params)

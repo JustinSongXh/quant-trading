@@ -28,6 +28,13 @@ data/hf_cache/
 # 第三方 Kronos 仓库 clone（自带 .git，误 add 会变成嵌套仓库）
 tests/kronos_repo/
 
+# AI 生成策略的中间产物（待校验 / 校验失败归档），纯本地垃圾；
+# 已启用的 strategy/custom/*.py 是正经产物，照常入 git
+strategy/custom/_staging/*
+!strategy/custom/_staging/.gitkeep
+strategy/custom/_rejected/*
+!strategy/custom/_rejected/.gitkeep
+
 # Environment & secrets
 .env
 .env.local

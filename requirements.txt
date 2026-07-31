@@ -20,3 +20,6 @@ transformers>=4.40.0
 
 # 进程内定时任务（每日清理窗口外新闻）
 apscheduler>=3.10.0
+
+# AI 生成自定义策略（Claude Agent SDK，底层依赖镜像内的 claude CLI）
+claude-agent-sdk>=0.2.128
