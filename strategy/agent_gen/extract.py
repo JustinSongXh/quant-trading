@@ -51,6 +51,26 @@ def extract(texts: list[str]) -> tuple[str | None, str | None]:
     if key is None:
         return None, None
 
+    code = _last_strategy_block(blob)
+    if code is None:
+        return None, None
+
+    return key, code
+
+
+def prose(texts: list[str]) -> str:
+    """剥掉交付载荷（代码块 + STRATEGY_KEY 行），只留面向用户的说明文字。
+
+    交付回合的原文不能直接当聊天气泡渲染——整份源码进对话区没人看，它该进校验面板
+    的 st.code 里。但模型交付时往下写的那段说明是有用的，保留。
+    """
+    blob = "\n".join(t for t in texts if t)
+    blob = FENCE_RE.sub("", blob)
+    blob = KEY_RE.sub("", blob)
+    return "\n".join(line for line in blob.splitlines() if line.strip()).strip()
+
+
+def _last_strategy_block(blob: str) -> str | None:
     code = None
     for m in FENCE_RE.finditer(blob):
         if m.group("lang").lower() not in PYTHON_LANGS:
@@ -62,7 +82,4 @@ def extract(texts: list[str]) -> tuple[str | None, str | None]:
             continue
         if find_strategy_classes(tree):
             code = body
-    if code is None:
-        return None, None
-
-    return key, code
+    return code

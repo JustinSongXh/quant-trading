@@ -14,6 +14,7 @@
 
 import os
 import shutil
+import subprocess
 import sys
 import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -219,6 +220,51 @@ def test_child_process_isolation():
         assert not any(m.startswith("_smoke_") for m in sys.modules), \
             "被测模块被加载进了父进程"
         print("[OK] 被测策略只在子进程里生效，父进程环境与 sys.modules 干净")
+    finally:
+        cleanup()
+
+
+# ---------- 6. 不依赖调用方的 __main__ ----------
+def test_independent_of_caller_main():
+    """闸门的行为不能取决于调用方长什么样。
+
+    multiprocessing 的 spawn 会 re-import 父进程的 __main__，于是调用方的顶层代码
+    在子进程里重跑一遍——实测一个顶层没加 __main__ 守卫的脚本，子进程把整段脚本
+    连模型调用一起重跑了 26s，回测还没开始就撞上 30s 超时。改用 subprocess 跑
+    smoke 自己的 __main__ 之后，调用方顶层写什么都与闸门无关。
+    """
+    try:
+        strategy_path = write("t_smoke", GOOD)
+        caller = os.path.join(TMP, "noisy_caller.py")
+        with open(caller, "w", encoding="utf-8") as f:
+            f.write(
+                "import sys\n"
+                f"sys.path.insert(0, {os.path.dirname(os.path.dirname(os.path.abspath(__file__)))!r})\n"
+                "from strategy.agent_gen import smoke\n"
+                # 顶层可执行语句，且刻意不加 __main__ 守卫：spawn 方案下会被子进程重跑
+                "print('CALLER_TOPLEVEL_RAN')\n"
+                f"r = smoke.run({strategy_path!r}, 't_smoke', synthetic=True)\n"
+                "print('OK' if r.ok else 'FAIL', r.error)\n"
+            )
+        out = subprocess.run([sys.executable, caller], capture_output=True, text=True,
+                             timeout=180).stdout
+        assert "OK " in out or out.strip().endswith("OK"), out
+        assert out.count("CALLER_TOPLEVEL_RAN") == 1, \
+            f"调用方顶层代码被子进程重跑了 {out.count('CALLER_TOPLEVEL_RAN')} 次：\n{out}"
+        print("[OK] 调用方顶层代码只执行一次——闸门不再 re-import 调用方的 __main__")
+    finally:
+        cleanup()
+
+
+def test_strategy_stdout_does_not_break_parsing():
+    """被测策略在方法里 print（合法）不能干扰结果解析"""
+    try:
+        noisy = GOOD.replace("        if ctx.decision == 1:",
+                             "        print('strategy noise', ctx.date)\n"
+                             "        if ctx.decision == 1:")
+        result = smoke.run(write("t_noisy", noisy), "t_noisy", synthetic=True)
+        assert result.ok, f"{result.error}\n{result.detail}"
+        print("[OK] 策略自己往 stdout 打东西不影响结果解析")
     finally:
         cleanup()
 

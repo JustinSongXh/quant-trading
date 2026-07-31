@@ -6,16 +6,23 @@
 为什么必须开子进程：AST 静态校验挡不住死循环和死锁。`while True: pass` 完全合法，
 一旦在 Streamlit 进程里 import + 执行就是整站卡死。子进程 + 硬超时是唯一兜底。
 
-用 spawn 而非默认的 fork：Streamlit 每次 rerun 在独立线程执行，从多线程进程 fork
-可能带走一把被别的线程持有的锁，子进程一上来就死锁——那正是本闸门要拦的症状，
-却发生在闸门自己身上。spawn 慢一两秒，但没有这个雷。
+为什么用 subprocess 而不是 multiprocessing：
+
+- fork 不行——Streamlit 每次 rerun 在独立线程执行，从多线程进程 fork 可能带走一把
+  被别的线程持有的锁，子进程一上来就死锁，正是本闸门要拦的症状发生在闸门自己身上。
+- spawn 也不行——它为了拿到目标函数会 **re-import 父进程的 `__main__`**。调用方的
+  顶层代码于是在子进程里重跑一遍：实测一个顶层没加 `if __name__ == "__main__"` 的
+  脚本，子进程把整段脚本连模型调用一起重跑了 26s，还没开始回测就撞上超时。
+  闸门的行为不该取决于调用方长什么样。
+- subprocess 跑本模块的 `__main__`（见文件末尾）：与调用方完全无关，没有 pickle
+  约束，超时用 `subprocess.run(timeout=)` 一行搞定。
 """
 
 import importlib.util
+import json
 import logging
 import math
-import multiprocessing
-import queue
+import subprocess
 import sys
 import time
 import traceback
@@ -33,6 +40,13 @@ SMOKE_CASES = [("000300", "index"), ("600000", "stock")]
 # 合成行情的固定截止日：保证同一策略每次跑拿到完全一致的数据。
 # 没有它，回测结果随「今天是哪天」漂移，闸门就成了掷骰子。
 SYNTHETIC_END = "2024-12-31"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# 子进程用 `python -m strategy.agent_gen.smoke` 起，结果这一行前缀之后跟 JSON。
+# 加前缀是因为被测策略可能往 stdout 打东西（顶层 print 被闸门2 拦了，但方法里的
+# print 是合法的），不能假定 stdout 只有我们那一行。
+RESULT_PREFIX = "__SMOKE_RESULT__ "
 
 
 @dataclass
@@ -63,76 +77,74 @@ def run(path, key: str, *, synthetic: bool = False,
                    实际生成流程走真实行情，才能暴露真实数据里的 NaN / 停牌等情况。
         timeout: 硬超时秒数，超时即判失败并杀掉子进程
     """
-    ctx = multiprocessing.get_context("spawn")
-    q = ctx.Queue()
-    proc = ctx.Process(target=_child_main, args=(str(path), key, synthetic, q), daemon=True)
+    cmd = [sys.executable, "-m", "strategy.agent_gen.smoke", str(path), key]
+    if synthetic:
+        cmd.append("--synthetic")
 
     started = time.monotonic()
-    payload = None
-    proc.start()
     try:
-        payload = _await_payload(proc, q, timeout)
-    finally:
-        # 超时说明子进程还在死循环，没必要再等它自己退出，直接杀
-        _terminate(proc, reap_wait=0 if payload is None else 3)
-
-    elapsed = time.monotonic() - started
-    if payload is None:
+        proc = subprocess.run(
+            cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        elapsed = time.monotonic() - started
         return SmokeResult(
             ok=False,
             error=f"冒烟回测超时（>{timeout:.0f}s）：策略可能存在死循环或死锁",
             detail=f"子进程在 {elapsed:.1f}s 后被强制终止，未返回任何结果。",
         )
-    if payload.get("crashed"):
-        return SmokeResult(ok=False, error=payload["error"], detail=payload.get("detail", ""))
+
+    elapsed = time.monotonic() - started
+    payload = _parse_result(proc.stdout)
+    if payload is None:
+        return SmokeResult(
+            ok=False,
+            error=f"子进程未返回结果（exitcode={proc.returncode}）",
+            detail=(proc.stderr or proc.stdout or "无输出")[-4000:],
+        )
+    if not payload.get("ok"):
+        return SmokeResult(ok=False, error=payload.get("error", "未知错误"),
+                           detail=payload.get("detail", ""))
 
     logger.info("冒烟回测通过 %s（%.1fs）", key, elapsed)
     return SmokeResult(ok=True, cases=payload["cases"])
 
 
-def _await_payload(proc, q, timeout: float) -> dict | None:
-    """等子进程交结果；超时或进程猝死（没来得及入队）都返回 None"""
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            return q.get(timeout=0.1)
-        except queue.Empty:
-            pass
-        if not proc.is_alive():
-            # 进程已退出：可能结果刚入队还没到管道这头，再给一次机会
+def _parse_result(stdout: str) -> dict | None:
+    """从 stdout 里挑出结果行。被测策略自己打的东西一律忽略。"""
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith(RESULT_PREFIX):
             try:
-                return q.get(timeout=0.5)
-            except queue.Empty:
-                return {"crashed": True,
-                        "error": f"子进程异常退出（exitcode={proc.exitcode}），未返回结果",
-                        "detail": "通常是段错误或被 OOM killer 杀掉。"}
-        if time.monotonic() >= deadline:
-            return None
-
-
-def _terminate(proc, reap_wait: float = 3) -> None:
-    if reap_wait:
-        proc.join(reap_wait)
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(3)
-    if proc.is_alive():
-        proc.kill()
-        proc.join(3)
+                return json.loads(line[len(RESULT_PREFIX):])
+            except json.JSONDecodeError:
+                return None
+    return None
 
 
 # ========== 子进程 ==========
 
-def _child_main(path: str, key: str, synthetic: bool, q) -> None:
-    """spawn 的入口，必须是模块级函数（要能被 pickle）"""
-    try:
-        q.put({"cases": _run_cases(path, key, synthetic)})
-    except Exception as e:
-        q.put({
-            "crashed": True,
-            "error": f"{type(e).__name__}: {e}",
-            "detail": traceback.format_exc(),
-        })
+def _child_main(argv: list[str]) -> int:
+    """子进程入口：`python -m strategy.agent_gen.smoke <path> <key> [--synthetic]`
+
+    结果打到 stdout 的 RESULT_PREFIX 行。始终返回 0——失败信息在 JSON 里，
+    用 exitcode 表达失败会和「解释器自己崩了」混在一起分不清。
+    """
+    synthetic = "--synthetic" in argv
+    positional = [a for a in argv if not a.startswith("--")]
+    if len(positional) != 2:
+        payload = {"ok": False, "error": "用法：smoke.py <path> <key> [--synthetic]"}
+    else:
+        path, key = positional
+        try:
+            payload = {"ok": True, "cases": _run_cases(path, key, synthetic)}
+        except Exception as e:
+            payload = {
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+                "detail": traceback.format_exc(),
+            }
+    print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+    return 0
 
 
 def _load_strategy_class(path: str, key: str):
@@ -213,3 +225,7 @@ def run_path(path, **kw) -> SmokeResult:
     """便捷入口：从文件名推 key（仅用于命令行手工验证）"""
     stem = Path(path).stem
     return run(path, stem.split("__", 1)[-1], **kw)
+
+
+if __name__ == "__main__":
+    sys.exit(_child_main(sys.argv[1:]))

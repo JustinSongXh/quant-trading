@@ -105,6 +105,18 @@ def reject(run_id: str, key: str, reason: str = "") -> Path | None:
     return dst
 
 
+def drop_staging(run_id: str, key: str) -> bool:
+    """直接丢掉 staging 文件（不归档）。返回是否真的删了。
+
+    用于模型在回灌中改名重交：旧 key 的那版既没被拒也没被启用，进 _rejected
+    只是给人工清理添活。
+    """
+    path = staging_path(run_id, key)
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    return existed
+
+
 def promote(run_id: str, key: str) -> Path:
     """把通过全部闸门的策略从 _staging/ 移入 custom/ 并立即生效。
 
