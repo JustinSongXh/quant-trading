@@ -200,63 +200,42 @@ def _fetch_sector(name: str, kind: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def _market_traded_today(today_date) -> bool:
-    """今天 A 股是否已开盘（交易日闸门）。
-
-    THS 实时板块快照没有可靠日期字段，工作日节假日会返回上一交易日快照，误当今日会
-    造出幻影 bar 污染日 K/回测。用腾讯上证指数（000001）实时快照的交易日期做闸门：
-    仅当其 date==今日（今天确实开过盘）才允许补当日 bar。取价失败按"未开盘"处理（宁缺勿错）。
-    """
-    from data.realtime import get_realtime_quotes  # 延迟导入避免循环依赖
-    q = get_realtime_quotes([("000001", "index")]).get(("000001", "index"))
-    return bool(q) and q.get("date") == today_date.isoformat()
-
-
 def _today_sector_bar_from_ths(name: str, kind: str, today_date, columns) -> pd.DataFrame | None:
     """收盘后 THS 板块 EOD 未发布时，用 THS 实时板块快照补一根当日 bar。
 
-    数据源：行业 stock_board_industry_info_ths / 概念 stock_board_concept_info_ths，
-    返回「项目/值」表，含 今开/昨收/最高/最低/成交量(万手)/板块涨幅。点位与 EOD 同标度。
-    当日收盘 = 昨收 × (1 + 板块涨幅/100)，OHLC 与量取自快照。
+    快照取数与展示层共用 realtime.get_sector_snapshot（同一份解析、同一层 TTL 缓存）。
+    当日收盘 = 昨收 × (1 + 板块涨幅/100)，OHLC 与量取自快照，点位与 EOD 同标度。
     非交易日（指数闸门未过）/取数失败/字段缺失 → None（不合成，回到板块滞后一天的现状）。
+
+    ⚠️ 这条路径**写进日K**，所以必须过交易日闸门：THS 快照没有日期字段，节假日会返回
+    上一交易日的数据，误当今日会造出幻影 bar 污染回测。展示层不需要这道闸门。
     """
-    if not _market_traded_today(today_date):
-        return None
-    import akshare as ak
-    try:
-        fn = ak.stock_board_industry_info_ths if kind == "industry" else ak.stock_board_concept_info_ths
-        raw = fn(symbol=name)
-        kv = dict(zip(raw["项目"], raw["值"]))
-    except Exception as e:
-        logger.warning(f"THS 板块实时快照失败 {name}({kind}): {e}")
+    # 延迟导入避免与 realtime 循环依赖（realtime 顶层 import 了本模块的 is_hk_stock）
+    from data.realtime import get_sector_snapshot, market_traded_today
+
+    if not market_traded_today(today_date):
         return None
 
-    prev_close = _safe_num(kv.get("昨收"))
-    pct = _safe_num(str(kv.get("板块涨幅", "")).replace("%", ""))
-    if prev_close is None or pct is None:
-        logger.warning(f"THS 板块实时快照缺字段 {name}({kind}): {kv}")
+    snap = get_sector_snapshot(name, kind)
+    if not snap:
         return None
-    close = round(prev_close * (1 + pct / 100), 3)
-    vol_wan = _safe_num(kv.get("成交量(万手)"))
+
+    close = snap["price"]
     row = {
-        "open": _safe_num(kv.get("今开")) or close,
-        "high": _safe_num(kv.get("最高")) or close,
-        "low": _safe_num(kv.get("最低")) or close,
+        "open": snap["open"],
+        "high": snap["high"],
+        "low": snap["low"],
         "close": close,
-        "volume": round(vol_wan * 10000) if vol_wan is not None else 0,
+        "volume": snap["volume"],
     }
     cols = list(columns) if len(columns) else list(row.keys())
     data = {c: row.get(c) for c in cols}
-    logger.info(f"  {name}({kind}): 补当日 bar close={close} ({pct:+.2f}%) via THS 实时快照")
+    logger.info(
+        f"  {name}({kind}): 补当日 bar close={close} "
+        f"({snap['change_pct']:+.2f}%) via THS 实时快照"
+    )
     idx = pd.Index([pd.Timestamp(today_date)], name="date")
     return pd.DataFrame([data], index=idx)
-
-
-def _safe_num(s):
-    try:
-        return float(s)
-    except (ValueError, TypeError):
-        return None
 
 
 # ========== 统一入口 ==========

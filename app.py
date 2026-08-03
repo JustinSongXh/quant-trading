@@ -118,6 +118,66 @@ def get_recommendation(decision):
 SIGNAL_SOURCE_LABELS = {"technical": "技术指标", "chanlun": "缠论", "kronos": "Kronos 模型"}
 
 
+def _overview_meta_row(code, name, stype, market, signal_df, rt):
+    """总览页一行的展示字段（纯函数，便于测试）
+
+    Args:
+        signal_df: 带 close 列、DatetimeIndex 的信号表
+        rt: 该标的的实时快照（get_realtime_quotes 的一项），取不到时为 None
+
+    板块与个股走**同一条口径**（#32）：现价来自实时快照、昨收来自已收盘的最后一根
+    bar、涨跌幅由这两者相除。板块此前单独用「日K最后两根收盘价」算，盘中日K还没有
+    当日 bar，算出来的是上一交易日的涨跌（实测 2026-08-03 盘中消费电子显示 +3.49%
+    ——那是 07-31 的涨幅，当日实为 +0.10%）。
+    """
+    from datetime import date as _date
+
+    n = len(signal_df)
+    # 收盘后 fetch 会补上当日 bar（板块经 _today_sector_bar_from_ths、个股经
+    # _today_bar_from_realtime）；盘中当日 bar 会被剔除。
+    has_today_bar = n >= 2 and signal_df.index[-1].date() == _date.today()
+
+    # 昨收 = 最后一根**已收盘**的 bar，「日期」跟着昨收走——表头按 f"昨收({日期})"
+    # 渲染，取成现价那根就会张冠李戴（板块此前就是这样，显示「昨收(07-31)」而那一
+    # 格的值其实是 07-30 收盘）。
+    prev_i = -2 if has_today_bar else -1
+    prev_close = round(float(signal_df.iloc[prev_i]["close"]), 2)
+    last_date = str(signal_df.index[prev_i].date())
+
+    if rt and rt.get("price"):
+        cur_price = round(float(rt["price"]), 2)
+        # 板块快照自带昨收，用它而不是日K那根：两者同源才不会出现
+        # 「现价==昨收 但涨跌幅≠0」的不一致（#26 在个股上踩过）
+        snap_prev = rt.get("prev_close")
+        if snap_prev:
+            prev_close = round(float(snap_prev), 2)
+    elif stype == "sector" and n >= 2:
+        # 板块快照取不到，回落到日K最后两根收盘价——即改动前的行为，盘中会滞后到
+        # 上一交易日，但比显示 0.00% 有信息量。日期仍跟着昨收那根走。
+        cur_price = round(float(signal_df.iloc[-1]["close"]), 2)
+        prev_close = round(float(signal_df.iloc[-2]["close"]), 2)
+        last_date = str(signal_df.index[-2].date())
+    else:
+        # 个股/指数取不到实时价：现价按昨收显示，涨跌幅 0（与改动前一致）
+        cur_price = prev_close
+
+    change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+
+    # 指数/板块 PE 无意义或口径不明，不展示
+    pe_raw = rt.get("pe") if rt else None
+    if stype in ("index", "sector") or pe_raw is None:
+        pe_val = "-"
+    else:
+        pe_val = round(float(pe_raw), 2)
+
+    return {
+        "市场": _market_label(stype, market), "股票": f"{name}({code})",
+        "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
+        "市盈率": pe_val,
+        "日期": last_date, "_code": code, "_type": stype,
+    }
+
+
 def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
                       kronos_progress=None, force_refresh_data=False):
     """扫描股票池，计算指定 source 的信号；signal_df 按 source 缓存到 session_state"""
@@ -156,41 +216,8 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
                                        progress_cb=_kronos_cb if use_kronos else None)
             src_cache[cache_id] = signal_df
 
-            from datetime import date as _date
-            last = signal_df.iloc[-1]
-            if stype == "sector":
-                # 板块无腾讯实时行情，涨跌幅直接用 THS 日K最后两根收盘价算：
-                # 收盘后即当日真实涨跌；盘中尚无当日 bar 时反映上一交易日，略滞后但可接受。
-                cur_price = round(float(last["close"]), 2)
-                prev_close = round(float(signal_df.iloc[-2]["close"]), 2) if len(signal_df) >= 2 else cur_price
-                last_date = str(signal_df.index[-1].date())
-                change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
-            else:
-                if signal_df.index[-1].date() == _date.today() and len(signal_df) >= 2:
-                    prev_close = round(float(signal_df.iloc[-2]["close"]), 2)
-                    last_date = str(signal_df.index[-2].date())
-                else:
-                    prev_close = round(float(last["close"]), 2)
-                    last_date = str(signal_df.index[-1].date())
-                rt = realtime.get((code, stype))
-                cur_price = round(float(rt["price"]), 2) if rt else prev_close
-                # 直接用现价/昨收算涨跌幅，避免非交易日 realtime 返回上一交易日快照导致
-                # "现价==昨收 但涨跌幅≠0" 的不一致
-                change_pct = round((cur_price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
-            market_label = _market_label(stype, market)
-            # 指数/板块 PE 无意义或口径不明，不展示
-            pe_raw = rt.get("pe") if rt else None
-            if stype in ("index", "sector") or pe_raw is None:
-                pe_val = "-"
-            else:
-                pe_val = round(float(pe_raw), 2)
-
-            meta_cache[cache_id] = {
-                "市场": market_label, "股票": f"{name}({code})",
-                "昨收": prev_close, "现价": cur_price, "涨跌幅": change_pct,
-                "市盈率": pe_val,
-                "日期": last_date, "_code": code, "_type": stype,
-            }
+            meta_cache[cache_id] = _overview_meta_row(
+                code, name, stype, market, signal_df, realtime.get((code, stype)))
         except Exception:
             market_label = _market_label(stype, market)
             src_cache[cache_id] = None
@@ -785,7 +812,10 @@ def page_detail():
         signal_color = "#e74c3c" if signal_val >= buy_th else "#27ae60" if signal_val <= sell_th else "#666"
 
         # 市盈率（指数/板块/缺值显示 -；负 PE 即亏损股，原样展示）
-        rt_quote = get_realtime_quotes([(symbol, stype)]).get((symbol, stype))
+        # 板块直接跳过取价：这里只用 pe，而板块的 pe 恒为 "-"，问一次要多打一次
+        # THS 板块快照接口（每个板块一次请求，冷启动还要先拉概念名称表）
+        rt_quote = (None if stype == "sector"
+                    else get_realtime_quotes([(symbol, stype)]).get((symbol, stype)))
         pe_raw = rt_quote.get("pe") if rt_quote else None
         if stype in ("index", "sector") or pe_raw is None:
             pe_text = "-"
