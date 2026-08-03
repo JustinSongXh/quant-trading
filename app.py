@@ -534,6 +534,126 @@ def render_sentiment_card(symbol, stock_type):
         st.rerun()
 
 
+# ========== 基本面卡片（issue #33） ==========
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_fundamentals_data(symbol, stock_type, day):
+    """基本面原始数据（底下还有 24h 文件缓存，这层只是省掉重复解析）。day 用于按日失效。"""
+    from data.fundamentals import get_fundamentals
+    return get_fundamentals(symbol, stock_type=stock_type)
+
+
+def _fmt_money(v):
+    """173964000000.0 → '1739.64亿'"""
+    if v is None:
+        return "—"
+    for unit, scale in (("万亿", 1e12), ("亿", 1e8), ("万", 1e4)):
+        if abs(v) >= scale:
+            return f"{v / scale:.2f}{unit}"
+    return f"{v:.2f}"
+
+
+def _fmt_pct(v):
+    return "—" if v is None else f"{v:.2f}%"
+
+
+def _flag_color(flag):
+    """标签着色：利空红、利好绿，其余灰"""
+    if any(k in flag for k in ("下滑", "恶化", "走弱", "下降", "为负", "新高")):
+        return "#c0392b"
+    if any(k in flag for k in ("改善", "走强", "上升", "新低")):
+        return "#27ae60"
+    return "#7f8c8d"
+
+
+def render_fundamental_card(symbol, stock_type):
+    """单股票分析页：基本面卡片（确定性层，零 token 成本，不产生任何交易信号）"""
+    from datetime import date
+
+    from analysis.fundamental import summarize
+
+    st.markdown("---")
+    st.subheader("📊 基本面")
+    st.caption("同花顺财报摘要：单季度近 12 季判趋势、年度近 5 年看水平；仅作参考，不参与信号与回测")
+
+    if stock_type in ("index", "sector") or is_hk_stock(symbol):
+        st.info("基本面数据仅支持 A 股")
+        return
+    try:
+        with st.spinner("拉取财报摘要中…"):
+            fund = get_fundamentals_data(symbol, stock_type, date.today().isoformat())
+    except Exception as e:
+        st.info(f"基本面数据暂不可用：{e}")
+        return
+    if not fund:
+        st.info("基本面数据暂不可用")
+        return
+    try:
+        s = summarize(fund)
+    except Exception as e:
+        st.info(f"基本面数据暂不可用：{e}")
+        return
+
+    latest = s["latest"]
+    st.markdown(f"##### 最新单季（{s['period'] or '—'}）")
+    cols = st.columns(6)
+    cols[0].metric("营业总收入", _fmt_money(latest["营业总收入"]),
+                   _fmt_pct(latest["营业总收入同比增长率"]))
+    cols[1].metric("净利润", _fmt_money(latest["净利润"]),
+                   _fmt_pct(latest["净利润同比增长率"]))
+    cols[2].metric("销售净利率", _fmt_pct(latest["销售净利率"]))
+    cols[3].metric("净资产收益率", _fmt_pct(latest["净资产收益率"]),
+                   f"近 8 季均值 {_fmt_pct(s['roe_level']['avg8'])}", delta_color="off")
+    pct = s["leverage"]["percentile"]
+    pct_text = "—" if pct is None else f"{pct:.0f}%"
+    cols[4].metric("资产负债率", _fmt_pct(latest["资产负债率"]),
+                   f"近 {s['leverage']['years']} 年分位 {pct_text}", delta_color="off")
+    cols[5].metric("营收同比趋势", s["revenue_trend"]["direction"],
+                   f"连续 {s['revenue_trend']['quarters']} 季", delta_color="off")
+
+    if s["flags"]:
+        badges = "".join(
+            f'<span style="display:inline-block;background:{_flag_color(f)};color:#fff;'
+            f'border-radius:10px;padding:2px 10px;margin:2px 6px 2px 0;font-size:13px">{f}</span>'
+            for f in s["flags"]
+        )
+        st.markdown(badges, unsafe_allow_html=True)
+
+    # 近 12 季单季同比（营收 + 净利）
+    rev = s["revenue_trend"]["series"]
+    prof = s["profit_trend"]["series"]
+    if rev or prof:
+        fig = go.Figure()
+        for ser, label, color in ((rev, "营收同比", "#2196F3"), (prof, "净利同比", "#FF6F00")):
+            if ser:
+                fig.add_trace(go.Scatter(
+                    x=[r["报告期"] for r in ser], y=[r["同比"] for r in ser],
+                    mode="lines+markers", name=label, line=dict(color=color, width=1.8),
+                    hovertemplate=f"{label} %{{x}}<br>%{{y:.2f}}%<extra></extra>",
+                ))
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=0.5)
+        fig.update_layout(height=300, margin=dict(l=60, r=20, t=30, b=20),
+                          yaxis_title="单季同比 (%)",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.01))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # 近 5 年年度指标
+    a_rows = fund["annual"]["rows"]
+    if a_rows:
+        st.markdown("##### 近 5 年年度指标")
+        table = [{
+            "年度": r["报告期"],
+            "营业总收入": _fmt_money(r["营业总收入"]),
+            "营收同比": _fmt_pct(r["营业总收入同比增长率"]),
+            "净利润": _fmt_money(r["净利润"]),
+            "净利同比": _fmt_pct(r["净利润同比增长率"]),
+            "销售净利率": _fmt_pct(r["销售净利率"]),
+            "净资产收益率": _fmt_pct(r["净资产收益率"]),
+            "资产负债率": _fmt_pct(r["资产负债率"]),
+        } for r in reversed(a_rows)]
+        st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+
+
 # ========== 新闻列表页 ==========
 
 def page_news_list():
@@ -1069,6 +1189,9 @@ def page_detail():
 
         # ========== 过去 10 个交易日情绪（公告/新闻/股吧） ==========
         render_sentiment_card(symbol, stype)
+
+        # ========== 基本面（确定性层，#33） ==========
+        render_fundamental_card(symbol, stype)
 
 
 # ========== 股票池管理页 ==========
