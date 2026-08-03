@@ -1,13 +1,23 @@
 """Mock 数据生成，用于在无法连接数据源时测试流程"""
 
+import zlib
+
 import pandas as pd
 import numpy as np
 
 
-def generate_mock_kline(symbol: str, days: int = 365, base_price: float = 100.0) -> pd.DataFrame:
-    """生成模拟日K线数据"""
-    np.random.seed(hash(symbol) % 2**31)
-    dates = pd.bdate_range(end=pd.Timestamp.now(), periods=days)
+def generate_mock_kline(symbol: str, days: int = 365, base_price: float = 100.0,
+                        end: str | pd.Timestamp | None = None) -> pd.DataFrame:
+    """生成模拟日K线数据
+
+    Args:
+        end: 末根 K 线日期，默认取当前时间。传固定日期可得到完全可复现的数据
+             （冒烟回测靠这个：同一策略每次跑必须拿到同一份行情）。
+    """
+    # 用 crc32 而非内置 hash：hash(str) 受 PYTHONHASHSEED 随机化，
+    # 同一 symbol 在不同进程里会得到不同数据，「按 symbol 复现」的本意落空。
+    np.random.seed(zlib.crc32(symbol.encode()) % 2**31)
+    dates = pd.bdate_range(end=end or pd.Timestamp.now(), periods=days)
 
     # 随机游走生成价格
     returns = np.random.normal(0.0005, 0.02, days)

@@ -153,3 +153,8 @@ PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 
 # ========== API 配置 ==========
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# ========== AI 生成自定义策略 ==========
+# 代码生成 provider（strategy/agent_gen/providers/ 下的文件名）。
+# 该 provider 不可用时，前端自动退到第一个可用的，见 registry.default_provider_key()
+DEFAULT_CODEGEN_PROVIDER = "claude_sdk"

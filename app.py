@@ -1218,14 +1218,310 @@ def _render_strategy_params(params: list[dict], key_prefix: str) -> dict:
     return kwargs
 
 
+# ========== AI 生成策略面板（#30）==========
+# 全部状态收在 st.session_state["cg_state"] 这一个 GenState 里，
+# 一次用户交互 = 一次 orchestrator.advance()，闸门回灌在 advance 内部跑完。
+
+CG_STATE = "cg_state"
+CG_RENAME = "cg_rename_open"
+
+
+def _cg_reset(provider_key: str, params: dict):
+    from strategy.agent_gen import orchestrator
+
+    st.session_state[CG_STATE] = orchestrator.new_state(provider_key, **params)
+    st.session_state.pop(CG_RENAME, None)
+
+
+def _cg_pick_provider():
+    """返回 (provider_meta, params)；无可用 provider 时返回 (None, None) 并已给出原因"""
+    from strategy.agent_gen import registry
+
+    metas = registry.list_providers()
+    if not metas:
+        st.warning("没有发现任何代码生成 provider（strategy/agent_gen/providers/ 为空）")
+        return None, None
+
+    usable = [m for m in metas if m["available"]]
+    if not usable:
+        st.warning("没有可用的代码生成 provider：")
+        for m in metas:
+            st.markdown(f"- **{m['name']}**：{m['reason']}")
+        return None, None
+
+    if len(usable) == 1:
+        meta = usable[0]
+        st.caption(f"**{meta['name']}** — {meta['description']}")
+    else:
+        labels = {m["name"]: m for m in usable}
+        # 默认项走 settings.DEFAULT_CODEGEN_PROVIDER（不可用时自动退到第一个可用的），
+        # 而不是 radio 的字母序第一项——否则加一个 provider 就可能悄悄改掉默认行为
+        default_key = registry.default_provider_key()
+        names = list(labels)
+        default_idx = next((i for i, n in enumerate(names)
+                            if labels[n]["key"] == default_key), 0)
+        chosen = st.radio("生成方式", names, index=default_idx,
+                          key="cg_provider", horizontal=True)
+        meta = labels[chosen]
+        st.caption(meta["description"])
+    # 不可用的也提一句，否则用户不知道另一个为什么没出现
+    for m in metas:
+        if not m["available"]:
+            st.caption(f"（{m['name']} 不可用：{m['reason']}）")
+
+    params = _render_strategy_params(meta["params"], f"cg_param_{meta['key']}")
+    return meta, params
+
+
+def _cg_owner() -> str:
+    """当前浏览器会话的 id：任务的归属。刷新页面就会换一个，旧任务因此被回收。"""
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        ctx = get_script_run_ctx()
+        if ctx is not None and ctx.session_id:
+            return ctx.session_id
+    except Exception:
+        pass
+    return "unknown-session"
+
+
+def _cg_start_job(provider_meta, params, text: str, synthetic: bool):
+    """把这一轮交给独立进程去跑（可杀），不在页面线程里阻塞"""
+    from strategy.agent_gen import jobs
+
+    state = st.session_state[CG_STATE]
+    # provider 选择/参数以当前表单为准：用户可能在两轮之间改了 effort
+    state.provider_key = provider_meta["key"]
+    state.provider_params = params
+    try:
+        jobs.start(_cg_owner(), state.to_dict(), text,
+                   smoke_options={"synthetic": True} if synthetic else {},
+                   label=text[:40])
+    except jobs.JobError as e:
+        st.error(str(e))
+        return
+    st.rerun()
+
+
+@st.fragment(run_every=1.0)
+def _cg_job_fragment() -> None:
+    """任务进度片段：每秒自己重跑一次，脚本主体不阻塞。
+
+    用 fragment 而不是「sleep + 整页 rerun」：整页忙轮询会把侧边栏、回测图表
+    全部重画一遍，而这里只需要刷一行进度。
+
+    poll() 顺带刷新心跳——一旦本会话不再轮询（刷新/关页面），后台回收线程就会
+    在 STALE_SECONDS 内杀掉这个任务。
+    """
+    from strategy.agent_gen import jobs
+
+    owner = _cg_owner()
+    job = jobs.get(owner)
+    if job is None:
+        return
+
+    out = jobs.poll(owner)
+    if out is not None:
+        _cg_consume(out)          # 内部 st.rerun()（默认整页），退出片段
+        return
+
+    st.info(f"🤔 模型正在思考…（已用 {job.elapsed:.0f} 秒；首轮通常 30~150 秒，"
+            "它会先读仓库里的基类和 broker）")
+    st.caption("刷新或关闭页面会自动终止这次生成，不会继续消耗额度。")
+    if st.button("⏹ 停止", key="cg_cancel"):
+        jobs.cancel(owner)
+        st.rerun()
+
+
+def _cg_consume(out: dict) -> None:
+    """任务出结果：写回状态。取消不算失败，静默回到原状态。"""
+    from strategy.agent_gen import jobs, orchestrator
+
+    jobs.finish(_cg_owner())
+    if out.get("ok"):
+        st.session_state[CG_STATE] = orchestrator.GenState.from_dict(out["state"])
+    elif out.get("cancelled"):
+        pass  # 状态没动过，回到发起前的样子
+    else:
+        state = st.session_state[CG_STATE]
+        state.status = orchestrator.ERROR
+        state.error = out.get("error", "未知错误")
+        if out.get("detail"):
+            state.fixes = [orchestrator.FixAttempt(
+                gate="runner", reason=state.error, detail=out["detail"])]
+    st.rerun()
+
+
+def _cg_render_fixes(state):
+    """闸门回灌只在折叠状态条里出现，堆栈展开才看——不进对话区（#30 5.3）"""
+    from strategy.agent_gen import orchestrator
+
+    for i, fix in enumerate(state.fixes, 1):
+        label = f"🔧 已自动修正（{i}/{orchestrator.MAX_FIX}）：{fix.reason}"
+        with st.expander(label, expanded=False):
+            st.code(fix.detail or "（无更多信息）", language="text")
+
+
+def _cg_render_panel(state):
+    """三道闸门逐项反馈 + 冒烟摘要 + 生成代码"""
+    st.success("三道闸门全部通过")
+    cols = st.columns(3)
+    cols[0].metric("闸门1 零写权限", "✅")
+    cols[1].metric("闸门2 静态校验", "✅")
+    cols[2].metric("闸门3 冒烟回测", "✅" if state.smoke_result else "—")
+
+    if state.smoke_result and state.smoke_result.ok:
+        st.markdown(f"**冒烟回测**：{state.smoke_result.summary()}")
+    with st.expander(f"📄 生成的代码：{state.key}.py", expanded=False):
+        st.code(state.code, language="python")
+
+
+def _cg_render_saved_list():
+    """已生成策略管理：列表 / 查看源码 / 删除"""
+    from strategy.agent_gen import store
+
+    items = store.list_custom()
+    if not items:
+        return
+    st.markdown("---")
+    st.markdown("**已生成的策略**")
+    for item in items:
+        label = item["name"] if item["registered"] else f"⚠️ {item['key']}（未能加载）"
+        cols = st.columns([6, 1])
+        cols[0].markdown(f"`{item['key']}` — {label}")
+        if cols[1].button("删除", key=f"cg_del_{item['key']}"):
+            store.delete(item["key"])
+            st.rerun()
+        with st.expander(f"查看 {item['key']}.py", expanded=False):
+            try:
+                st.code(store.read_source(item["key"]), language="python")
+            except store.StoreError as e:
+                st.error(str(e))
+
+
+def _render_codegen_expander():
+    from strategy.agent_gen import jobs, orchestrator, store
+
+    with st.expander("🤖 AI 生成新策略", expanded=False):
+        provider_meta, params = _cg_pick_provider()
+        if provider_meta is None:
+            return
+
+        if CG_STATE not in st.session_state:
+            _cg_reset(provider_meta["key"], params)
+        state = st.session_state[CG_STATE]
+
+        # ---- 有在跑的任务：只渲染历史 + 进度片段，其余 UI 一律不显示 ----
+        if jobs.get(_cg_owner()) is not None:
+            for msg in state.messages:
+                with st.chat_message(msg.role):
+                    st.markdown(msg.text)
+            _cg_job_fragment()
+            return
+
+        synthetic = st.checkbox(
+            "冒烟回测用合成行情", value=False, key="cg_synthetic",
+            help="默认用真实行情（沪深300 + 一只主板股，近1年）。数据源连不上时勾这个，"
+                 "改用固定合成 K 线——仍跑完整回测链路，只是行情是造的。",
+        )
+
+        # ---- 对话区 ----
+        for msg in state.messages:
+            with st.chat_message(msg.role):
+                st.markdown(msg.text)
+        _cg_render_fixes(state)
+
+        # ---- 各状态专属 UI ----
+        if state.status == orchestrator.ASKING:
+            st.caption(f"已澄清 {state.asks}/{orchestrator.MAX_ASKS} 轮 —— "
+                       "回答上面的问题，或直接让它自己定。")
+            if st.button("🙌 你决定就好", key="cg_decide",
+                         help="按推荐默认值定稿，不再反问；它替你做的决定会写进策略说明"):
+                _cg_start_job(provider_meta, params, orchestrator.DECIDE_FOR_ME, synthetic)
+
+        elif state.status == orchestrator.STUCK:
+            st.warning(f"已澄清 {orchestrator.MAX_ASKS} 轮仍未交付。"
+                       "可以让它按推荐默认值直接定稿，或重新开始。")
+            cols = st.columns(2)
+            if cols[0].button("🙌 你决定就好", key="cg_decide_stuck"):
+                _cg_start_job(provider_meta, params, orchestrator.DECIDE_FOR_ME, synthetic)
+            if cols[1].button("↺ 重新开始", key="cg_restart_stuck"):
+                _cg_reset(provider_meta["key"], params)
+                st.rerun()
+
+        elif state.status == orchestrator.READY:
+            _cg_render_panel(state)
+            cols = st.columns([2, 2, 3])
+            if cols[0].button("💾 保存并启用", key="cg_save", type="primary"):
+                try:
+                    orchestrator.promote(state)
+                    st.success(f"已启用 {state.key}，在下方策略列表里选它即可回测")
+                    _cg_reset(provider_meta["key"], params)
+                    st.rerun()
+                except store.KeyTakenError:
+                    # 闸门2 到这次点击之间被别的标签页抢了名字，给改名入口而不是打回模型
+                    st.session_state[CG_RENAME] = True
+                    st.rerun()
+                except store.StoreError as e:
+                    st.error(str(e))
+            if cols[1].button("✏️ 换个名字", key="cg_rename_btn"):
+                st.session_state[CG_RENAME] = True
+            if cols[2].button("↺ 重新开始", key="cg_restart_ready"):
+                _cg_reset(provider_meta["key"], params)
+                st.rerun()
+
+            if st.session_state.get(CG_RENAME):
+                new_key = st.text_input(
+                    "新的策略 key（小写字母开头，仅小写字母/数字/下划线）",
+                    value=state.key or "", key="cg_new_key",
+                )
+                if st.button("确认改名并保存", key="cg_rename_ok"):
+                    try:
+                        orchestrator.rename(state, new_key.strip())
+                        orchestrator.promote(state)
+                        st.success(f"已启用 {state.key}")
+                        _cg_reset(provider_meta["key"], params)
+                        st.rerun()
+                    except store.StoreError as e:
+                        st.error(str(e))
+
+        elif state.status == orchestrator.FAILED:
+            st.error(f"自动修正 {orchestrator.MAX_FIX} 次仍未通过闸门，已归档。"
+                     f"最后一次的原因：{state.error}")
+            st.caption("换个说法再试，或把要求说得更具体一些（尤其是仓位粒度和触发基准）。")
+            if st.button("↺ 重新开始", key="cg_restart_failed"):
+                _cg_reset(provider_meta["key"], params)
+                st.rerun()
+
+        elif state.status == orchestrator.ERROR:
+            st.error(f"调用模型失败：{state.error}")
+            if st.button("↺ 重新开始", key="cg_restart_error"):
+                _cg_reset(provider_meta["key"], params)
+                st.rerun()
+
+        # ---- 输入框（终态之外都可以继续说话）----
+        if state.can_submit:
+            placeholder = ("描述你想要的策略，例如「跌 5% 加仓 20%，涨 10% 清仓一半，最多 5 档」"
+                           if state.status == orchestrator.NEW else "回答上面的问题…")
+            text = st.chat_input(placeholder, key="cg_input")
+            if text:
+                _cg_start_job(provider_meta, params, text, synthetic)
+
+        _cg_render_saved_list()
+
+
 def page_custom_strategy():
     st.title("A股港股量化分析小程序")
     st.subheader("自定义交易策略")
     st.caption("交易策略负责「持仓周期里如何分批进出仓」，与左侧信号源（决定建仓触发时机）组合使用。")
 
+    # 放在 strategies 空值检查之前：把自定义策略全删光时，这个面板仍要能用
+    _render_codegen_expander()
+
     strategies = list_trade_strategies(custom_only=True)
     if not strategies:
-        st.info("暂无可用的自定义交易策略。")
+        st.info("暂无可用的自定义交易策略。可以用上面的「AI 生成新策略」造一个。")
         return
 
     # ---- 侧边栏：选股 + 信号源（建仓触发）----
