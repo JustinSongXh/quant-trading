@@ -4,16 +4,13 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc curl && rm -rf /var/lib/apt/lists/*
 
-# Node 20 + Claude Code CLI（claude-agent-sdk 的底层依赖，用于「AI 生成策略」）
-# 走 npmmirror：本部署环境到 nodejs.org / registry.npmjs.org 会静默卡死
-ENV NODE_VERSION=20.18.1
-RUN curl -fsSL --connect-timeout 15 --max-time 300 -o /tmp/node.tar.gz \
-      "https://cdn.npmmirror.com/binaries/node/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
-    && tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 \
-    && rm /tmp/node.tar.gz \
-    && npm config set registry https://registry.npmmirror.com \
-    && npm i -g @anthropic-ai/claude-code \
-    && npm cache clean --force
+# 「AI 生成策略」(#30) 在这里**什么都不装**，两层原因：
+# 1) 不需要 Node + @anthropic-ai/claude-code——claude-agent-sdk 的 linux-x64 wheel
+#    自带 _bundled/claude（262M 静态 ELF，ldd 只有 libc/libm/libpthread/librt），
+#    而 _find_cli() 先查 bundled 再查 PATH，npm 装的那个根本轮不上。
+# 2) 各家模型 SDK 本身也不进镜像——依赖跟着 provider 走（CodegenProvider.REQUIRES），
+#    要用哪家就 docker exec quant-app pip install 哪家。
+# 详见 tests/test_codegen_deps.py 与 #30 的评论。
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt fastapi uvicorn

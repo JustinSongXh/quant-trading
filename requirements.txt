@@ -21,5 +21,8 @@ transformers>=4.40.0
 # 进程内定时任务（每日清理窗口外新闻）
 apscheduler>=3.10.0
 
-# AI 生成自定义策略（Claude Agent SDK，底层依赖镜像内的 claude CLI）
-claude-agent-sdk>=0.2.128
+# AI 生成自定义策略（#30）的各家模型 SDK **刻意不列在这里、也不进镜像**：
+# 每家 SDK 只服务它自己那个 provider，焊进基础依赖等于让所有部署都背上用不到的包
+# （claude-agent-sdk 的 linux-x64 wheel 自带 262M 的 _bundled/claude）。
+# 依赖声明跟着 provider 文件走——见 CodegenProvider.REQUIRES，没装时选择器会显示
+# 不可用原因和一行可直接复制的 pip 命令。

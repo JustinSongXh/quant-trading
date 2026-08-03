@@ -1,8 +1,10 @@
 """Claude Agent SDK provider（#30）
 
-走宿主的 Claude Code OAuth 登录态（容器挂载 /root/.claude），经由镜像内的 claude
-CLI。裸 OAuth token 直打 /v1/messages 稳定 429，只在 CLI 客户端路径下被接受——
-见 #30 第一条评论，那条路已排除，不要再加回来当 fallback。
+走宿主的 Claude Code OAuth 登录态（容器挂载 /root/.claude），经由 claude-agent-sdk
+wheel 自带的 _bundled/claude（不需要 Node，也不需要 npm 装 @anthropic-ai/claude-code：
+SDK 的 _find_cli() 先查 bundled 再查 PATH，npm 装的那个根本轮不上）。裸 OAuth token
+直打 /v1/messages 稳定 429，只在 CLI 客户端路径下被接受——见 #30 第一条评论，
+那条路已排除，不要再加回来当 fallback。
 
 无状态多轮：每回合一次 query()，session_id 存进 Turn.session，下一轮用 resume 续上。
 **不用 ClaudeSDKClient 长连接**——Streamlit 每次交互重跑整个脚本，长连接会与 rerun
@@ -12,7 +14,6 @@ CLI。裸 OAuth token 直打 /v1/messages 稳定 429，只在 CLI 客户端路�
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
 
 from strategy.agent_gen.base import CodegenProvider, Turn
@@ -61,6 +62,9 @@ class ClaudeSdkProvider(CodegenProvider):
          "min": 1, "max": 5, "step": 1},
     ]
 
+    # 不进 requirements.txt / 镜像，见 CodegenProvider.REQUIRES 的说明
+    REQUIRES = (("claude_agent_sdk", "claude-agent-sdk>=0.2.128"),)
+
     EFFORTS = {1: "low", 2: "medium", 3: "high", 4: "xhigh", 5: "max"}
 
     def __init__(self, effort_level: int = 4):
@@ -71,12 +75,12 @@ class ClaudeSdkProvider(CodegenProvider):
 
     @classmethod
     def available(cls) -> tuple[bool, str]:
-        try:
-            import claude_agent_sdk  # noqa: F401
-        except ImportError:
-            return False, "未安装 claude-agent-sdk（requirements.txt 已列，需重建镜像）"
-        if shutil.which("claude") is None:
-            return False, "PATH 里找不到 claude CLI（镜像需装 @anthropic-ai/claude-code）"
+        ok, reason = cls.check_requirements()
+        if not ok:
+            return ok, reason
+        # 这里**不查 which("claude")**：CLI 由 wheel 自带（_bundled/claude），
+        # PATH 里本就不该有。真找不到时由 SDK 的 _find_cli() 抛 CLINotFoundError，
+        # 那条报错自带 remediation，比在这里手写一句更准。
         if not CREDENTIALS.exists():
             return False, (
                 f"找不到 {CREDENTIALS}：需把宿主 /root/.claude 挂进容器且可写"

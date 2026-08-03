@@ -15,6 +15,7 @@
 自带文件工具的 provider 保留的真实优势仍在：能 Read/Grep 真实仓库学接口风格。
 """
 
+import importlib.util
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -43,14 +44,49 @@ class CodegenProvider:
     description = ""          # 前端说明
     PARAMS: list[dict] = []   # 与 TradeStrategy.PARAMS 同 schema，复用 _render_strategy_params
 
+    # 该 provider 需要的第三方 SDK：((import 名, pip 规格), ...)
+    #
+    # ⚠️ 这些**不进 requirements.txt、不进镜像**。每家 provider 的 SDK 只服务它自己，
+    # 焊进基础镜像等于让所有部署都背上用不到的包（claude-agent-sdk 的 linux-x64
+    # wheel 自带 262M 的 _bundled/claude）。依赖声明跟着 provider 文件走，装不装由
+    # 用户决定：没装就在选择器里显示成不可用 + 一行可直接复制的 pip 命令。
+    REQUIRES: tuple[tuple[str, str], ...] = ()
+
     def __init__(self, **params):
         """params 来自前端按 PARAMS 渲染的表单；子类可改成显式关键字参数"""
         self.params = params
 
     @classmethod
+    def check_requirements(cls) -> tuple[bool, str]:
+        """REQUIRES 里的模块是否都装了，返回 (齐全, 缺失说明)。
+
+        用 find_spec 而不是 import：只探测存在性，不承担 import 副作用
+        （claude-agent-sdk 一 import 就去找 CLI），选择器渲染要快。
+        """
+        missing = []
+        for mod, spec in cls.REQUIRES:
+            try:
+                found = importlib.util.find_spec(mod) is not None
+            except (ImportError, ValueError):
+                found = False
+            if not found:
+                missing.append(spec)
+        if not missing:
+            return True, ""
+        pkgs = " ".join(f"'{s}'" for s in missing)
+        return False, (
+            f"未安装 {'、'.join(missing)}——本项目刻意不把各家 SDK 放进镜像，"
+            f"按需装：docker exec quant-app pip install {pkgs}"
+        )
+
+    @classmethod
     def available(cls) -> tuple[bool, str]:
-        """依赖与凭证是否就绪，返回 (可用, 不可用原因)。前端据此过滤 + 提示。"""
-        return True, ""
+        """依赖与凭证是否就绪，返回 (可用, 不可用原因)。前端据此过滤 + 提示。
+
+        默认只查 REQUIRES；还要查凭证/环境变量的子类覆写它，并在开头先调
+        check_requirements()——SDK 都没装时不该先报「找不到凭证」。
+        """
+        return cls.check_requirements()
 
     def start(self, user_text: str) -> Turn:
         """开启新会话"""

@@ -25,8 +25,17 @@ class TemplateProvider(CodegenProvider):
          "min": 0.0, "max": 1.0, "step": 0.1},
     ]
 
+    # 本 provider 要用的 SDK 写在这里，**不要加进 requirements.txt / Dockerfile**：
+    # 每家 SDK 只服务它自己，焊进基础依赖会让所有部署都背上用不到的包。没装时基类
+    # 会把它渲染成「不可用 + 一行 pip 命令」。纯 HTTP 调用的 provider 留空即可。
+    REQUIRES = (("openai", "openai>=1.0"),)
+
     @classmethod
     def available(cls) -> tuple[bool, str]:
+        # 先查 SDK 再查凭证：SDK 都没装时不该先报「没设 API key」
+        ok, reason = cls.check_requirements()
+        if not ok:
+            return ok, reason
         if not os.environ.get("TEMPLATE_API_KEY"):
             return False, "未设置环境变量 TEMPLATE_API_KEY"
         return True, ""
