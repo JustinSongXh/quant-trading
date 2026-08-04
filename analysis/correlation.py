@@ -156,13 +156,14 @@ def linkage_ranking(target_code, sector_codes, window=60, top_n=5, method="pears
     return {"target": target_name, "positive": positive, "negative": negative}
 
 
-def hedge_pairs(sector_codes, window=60, top_n=15, method="pearson", mode="raw") -> list:
-    """全局所有板块对里相关系数最低的 top_n 对（升序）。
+def pairs_from_matrix(mat: pd.DataFrame, top_n: int = 15,
+                      positive: bool = False) -> list:
+    """已算好的相关矩阵 → 极值板块对。`positive=False` 取最负（对冲），True 取最正（抱团）。
 
-    Returns: [(板块A, 板块B, 系数), ...]，系数从最负到较高。数据不足返回空列表。
+    吃矩阵而不是板块列表：页面上矩阵已经算过一次，再让 hedge_pairs 内部重算一遍，
+    95 个板块时等于把取数与计算白做一遍。NaN 对直接跳过（对齐后无重叠交易日的板块）。
     """
-    mat = corr_matrix(sector_codes, window=window, method=method, mode=mode)
-    if mat.empty:
+    if mat is None or mat.empty:
         return []
     cols = list(mat.columns)
     pairs = []
@@ -171,8 +172,17 @@ def hedge_pairs(sector_codes, window=60, top_n=15, method="pearson", mode="raw")
             v = mat.iloc[i, j]
             if pd.notna(v):
                 pairs.append((cols[i], cols[j], float(v)))
-    pairs.sort(key=lambda p: p[2])
+    pairs.sort(key=lambda p: p[2], reverse=positive)
     return pairs[:top_n]
+
+
+def hedge_pairs(sector_codes, window=60, top_n=15, method="pearson", mode="raw") -> list:
+    """全局所有板块对里相关系数最低的 top_n 对（升序）。
+
+    Returns: [(板块A, 板块B, 系数), ...]，系数从最负到较高。数据不足返回空列表。
+    """
+    mat = corr_matrix(sector_codes, window=window, method=method, mode=mode)
+    return pairs_from_matrix(mat, top_n=top_n, positive=False)
 
 
 def cluster_order(mat: pd.DataFrame) -> list:
@@ -195,3 +205,68 @@ def cluster_order(mat: pd.DataFrame) -> list:
         return [cols[i] for i in order]
     except Exception:
         return cols
+
+
+DEFAULT_MAX_GROUPS = 8
+
+
+def cluster_groups(mat: pd.DataFrame, max_groups: int = DEFAULT_MAX_GROUPS) -> list[dict]:
+    """相关矩阵 → 抱团分组，按组内平均相关系数降序（#29 评论：大 N 下的读法）。
+
+    板块多到几十个时热力图已经读不出东西（95×95 = 9025 格），但「谁和谁抱成一团」这个
+    结论仍然要能拿到——所以把 `cluster_order` 的层次聚类往前推一步，直接切成组。
+    距离与 linkage 方法与 `cluster_order` 完全一致（`1 - 相关系数` + average），
+    两个视图讲的是同一套聚类，不然「重排后相邻」与「分在同一组」会对不上。
+
+    Args:
+        max_groups: 最多切几组（fcluster 的 maxclust 上限，实际组数可能更少）
+
+    Returns:
+        `[{"members": [板块名...], "avg_corr": 组内两两平均相关 | None}]`，按 avg_corr 降序，
+        单成员组的 avg_corr 为 None（一个板块没有「组内相关」，给 0 会被当成不相关）。
+        板块数 < 3 或 scipy 不可用 → 全员一组（不抛异常，页面照样能渲染）。
+    """
+    cols = list(mat.columns) if mat is not None and not mat.empty else []
+    if not cols:
+        return []
+
+    labels = None
+    if len(cols) >= 3:
+        try:
+            from scipy.cluster.hierarchy import fcluster, linkage
+            from scipy.spatial.distance import squareform
+            dist = 1 - mat.values
+            dist = (dist + dist.T) / 2      # 强制对称，消除浮点误差
+            for i in range(len(dist)):
+                dist[i, i] = 0.0
+            condensed = squareform(dist, checks=False)
+            k = max(1, min(int(max_groups), len(cols)))
+            labels = fcluster(linkage(condensed, method="average"), t=k,
+                              criterion="maxclust")
+        except Exception:
+            labels = None
+    if labels is None:
+        labels = [1] * len(cols)
+
+    buckets: dict[int, list[str]] = {}
+    for name, label in zip(cols, labels):
+        buckets.setdefault(int(label), []).append(name)
+
+    groups = []
+    for members in buckets.values():
+        groups.append({"members": members, "avg_corr": _avg_pair_corr(mat, members)})
+    # 抱团最紧的排前面；avg_corr 为 None（单成员）的排最后
+    groups.sort(key=lambda g: (g["avg_corr"] is None, -(g["avg_corr"] or 0.0)))
+    return groups
+
+
+def _avg_pair_corr(mat: pd.DataFrame, members: list[str]) -> float | None:
+    """组内两两相关系数的均值（不含对角线）。成员 < 2 或全是 NaN → None"""
+    if len(members) < 2:
+        return None
+    sub = mat.loc[members, members]
+    vals = [sub.iloc[i, j] for i in range(len(members)) for j in range(i + 1, len(members))
+            if pd.notna(sub.iloc[i, j])]
+    if not vals:
+        return None
+    return round(float(sum(vals) / len(vals)), 4)
