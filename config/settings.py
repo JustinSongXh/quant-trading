@@ -199,6 +199,24 @@ SECTOR_HOTNESS_WEIGHTS = {
     "net_20d": 1.0,
 }
 
+# ========== 板块内选股（issue #35）==========
+# 两级漏斗的「细算」只数：成分股动辄上百只（实测 银行 84 家、电网设备 140 家），
+# 每只要取日K + 算信号 + 取财报，一次交互里算不完。先用成分股接口自带的涨跌幅粗筛
+# （免费），只对前 N 只做深度计算。页面上可临时改 N，且必须显示「已从 M 只中筛出 N 只」
+# ——被静默丢掉的覆盖面会被读成「全都算过了」（#30 的教训）。
+SECTOR_PICK_TOP_N = 20
+
+# 候选股排序分 = technical · z(技术信号) + excess · z(相对板块超额收益)
+#              + fundamental · 基本面加减分
+# 前两项在**候选集内**做 z-score；基本面加减分是 flags 的正负标签各 ±0.5 累加
+# （映射表写死在 analysis/sector_pick.py::_FLAG_RULES）。取不到基本面时该项为 0 并在
+# 该行标注，不静默当 0。改这里的权重，下一次选股即生效。
+SECTOR_PICK_WEIGHTS = {
+    "technical": 1.0,
+    "excess": 1.0,
+    "fundamental": 1.0,
+}
+
 # ========== 通知配置 ==========
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 
