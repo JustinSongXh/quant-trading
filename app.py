@@ -24,23 +24,31 @@ st.set_page_config(page_title="A股港股量化分析小程序", layout="wide")
 
 
 @st.cache_resource
-def _start_news_purge_scheduler():
-    """进程内每日定时清理窗口外新闻。
+def _start_background_jobs():
+    """进程内定时任务：每日清理窗口外新闻 + 收盘后落一份板块资金流快照。
 
     cache_resource 保证整个 app 进程只起一次（Streamlit 每次交互都会重跑脚本，
     普通模块级代码会重复执行；缓存资源不会）。容器 TZ=Asia/Shanghai，按本地时间触发。
+
+    资金流快照（#34）：资金流没有逐日历史接口，只能自己攒。15:40 跑（A 股 15:00 收盘，
+    留 40 分钟等 THS 数据稳定），工作日触发、非交易日由 snapshot_fund_flow 内部的交易日
+    闸门挡掉。本仓库目前没有任何功能读这张表——今天不开始积累，将来想用就得再等几个月。
     """
     from apscheduler.schedulers.background import BackgroundScheduler
     from data.news import purge_expired_news
+    from data.fund_flow import snapshot_fund_flow
 
     sched = BackgroundScheduler()
     sched.add_job(purge_expired_news, "cron", hour=3, minute=0,
                   id="purge_expired_news", replace_existing=True)
+    sched.add_job(snapshot_fund_flow, "cron", day_of_week="mon-fri",
+                  hour=15, minute=40,
+                  id="snapshot_sector_fund_flow", replace_existing=True)
     sched.start()
     return sched
 
 
-_start_news_purge_scheduler()
+_start_background_jobs()
 
 # 移动端适配 CSS
 st.markdown("""
@@ -2000,9 +2008,221 @@ def page_sector_correlation():
             st.caption("无数据")
 
 
+# ========== 板块轮动页（issue #34） ==========
+
+def _signed_color(v):
+    """正红负绿（沿用全站涨跌配色）；缺失值灰"""
+    if v is None or pd.isna(v):
+        return "color:#999999"
+    if v > 0:
+        return "color:#e74c3c"
+    if v < 0:
+        return "color:#27ae60"
+    return ""
+
+
+def _label_badge_color(label):
+    from analysis.rotation import LABEL_EMERGING, LABEL_FADING, LABEL_LAGGARD, LABEL_STRONG
+    return {LABEL_STRONG: "#c0392b", LABEL_EMERGING: "#e67e22",
+            LABEL_FADING: "#27ae60", LABEL_LAGGARD: "#7f8c8d"}.get(label, "#7f8c8d")
+
+
+def page_sector_rotation():
+    from analysis.rotation import (
+        HOTNESS_FLOW_PERIOD, HOTNESS_WINDOW, LABELS, LONG_WINDOW, SHORT_WINDOW,
+        VALID_WINDOWS, col_excess, col_rank, col_ret, hotness, momentum_table,
+        rotation_signals,
+    )
+    from data.fund_flow import LIVE_PERIOD, VALID_PERIODS, sector_fund_flow_ranking
+
+    st.title("板块轮动")
+    st.caption("板块相对强弱的排名迁移 + 资金流佐证：谁在持续走强、谁刚新晋走强、谁在转弱。"
+               "全是确定性计算，不产生交易信号、不进回测。")
+
+    pool_sectors = [s for s in load_stock_pool() if s.get("type") == "sector"]
+    name_by_code = {s["code"]: s["name"] for s in pool_sectors}
+
+    # 动量/热度只算池内板块：板块日K要逐个取，全市场 470+ 个板块全算不现实。
+    # 资金流排行反而是全市场——它一次调用就返回全部且已排序，是免费的。
+    st.sidebar.markdown("**动量 / 热度分范围**")
+    sel_labels = st.sidebar.multiselect(
+        "池内板块", [f"{n}({c})" for c, n in name_by_code.items()],
+        default=[f"{n}({c})" for c, n in name_by_code.items()], key="rot_sectors",
+    )
+    label_to_code = {f"{n}({c})": c for c, n in name_by_code.items()}
+    sel_codes = [label_to_code[l] for l in sel_labels if l in label_to_code]
+    windows = st.sidebar.multiselect("动量窗口（交易日）", list(VALID_WINDOWS),
+                                     default=list(VALID_WINDOWS), key="rot_windows")
+    windows = tuple(sorted(windows))
+
+    tab_flow, tab_mom, tab_hot, tab_sig = st.tabs(
+        ["资金流排行（全市场）", "池内板块动量", "热度分排名", "轮动提示"]
+    )
+
+    # ---------- 资金流排行（全市场） ----------
+    with tab_flow:
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            kind_label = st.radio("板块类型", ["行业", "概念"], horizontal=True, key="rot_kind")
+        with c2:
+            period = st.radio("档位", list(VALID_PERIODS), horizontal=True, key="rot_period")
+        kind = "industry" if kind_label == "行业" else "concept"
+
+        st.caption("**单位：亿元。**数据源只有 即时 / 3日 / 5日 / 10日 / 20日 这五档，"
+                   "**不支持任意区间**——「过去一个月」按 20日（20 个交易日）看，"
+                   "「过去 45 天」「7月15日到8月1日」这类做不到，也不能拿 20日 的数据硬答。")
+        with st.spinner("取资金流排行…"):
+            rows = sector_fund_flow_ranking(kind, period)
+        if not rows:
+            st.warning("资金流数据暂不可用（THS 接口取数失败），稍后再试。")
+        else:
+            live = period == LIVE_PERIOD
+            table = [{
+                "板块": r["sector"],
+                "板块指数": r["sector_index"],
+                ("当日涨跌幅%" if live else f"{period}涨跌幅%"): r["change_pct"],
+                "净额(亿)": r["net"],
+                "流入(亿)": r["inflow"],
+                "流出(亿)": r["outflow"],
+                "家数": r["company_count"],
+                **({"领涨股": r["leader"], "领涨股涨跌幅%": r["leader_change_pct"]}
+                   if live else {}),
+            } for r in rows]
+            df = pd.DataFrame(table).sort_values("净额(亿)", ascending=False,
+                                                 na_position="last")
+            pct_col = "当日涨跌幅%" if live else f"{period}涨跌幅%"
+            signed = ["净额(亿)", pct_col] + (["领涨股涨跌幅%"] if live else [])
+            fmt = {"板块指数": "{:.2f}", pct_col: "{:+.2f}", "净额(亿)": "{:+.2f}",
+                   "流入(亿)": "{:.2f}", "流出(亿)": "{:.2f}"}
+            if live:
+                fmt["领涨股涨跌幅%"] = "{:+.2f}"
+            st.dataframe(df.style.format(fmt, na_rep="—").map(_signed_color, subset=signed),
+                         hide_index=True, use_container_width=True, height=520)
+            st.caption(f"{kind_label}板块共 {len(rows)} 个（同名去重后），按净额降序。"
+                       "接口内部是分页抓的，板块条数每次会有出入，个别板块可能整批缺失。"
+                       + ("N日档没有领涨股/当前价字段，接口本身不返回。" if not live else ""))
+
+    if not pool_sectors:
+        with tab_mom:
+            st.info("股票池里还没有板块。请到「股票池管理」页添加行业/概念板块，动量与热度分才能算。")
+        return
+    if not sel_codes or not windows:
+        with tab_mom:
+            st.info("请在左侧选择至少 1 个板块和 1 个动量窗口。")
+        return
+
+    with st.spinner("计算板块动量（首次取板块日K可能较慢）…"):
+        mom = momentum_table(sel_codes, windows=windows)
+
+    index_ok = bool(mom.attrs.get("index_available", True))
+    excess_note = ("超额收益 = 板块累计收益 − 沪深300 同窗口累计收益。" if index_ok else
+                   "⚠️ 沪深300 数据取不到，「超额」列此刻实际是**绝对收益**（已降级）。")
+
+    # ---------- 池内板块动量矩阵 ----------
+    with tab_mom:
+        st.markdown("**行=板块，列=各窗口超额收益与池内排名**")
+        show = mom.drop(columns=["code"])
+        excess_cols = [col_excess(w) for w in windows]
+        fmt = {}
+        for w in windows:
+            fmt[col_ret(w)] = "{:+.2f}"
+            fmt[col_excess(w)] = "{:+.2f}"
+            fmt[col_rank(w)] = "{:.0f}"
+        vals = show[excess_cols].to_numpy(dtype="float64", na_value=float("nan"))
+        lim = pd.Series(vals.ravel()).abs().max()
+        sty = show.style.format(fmt, na_rep="—")
+        if pd.notna(lim) and lim > 0:
+            # 红=强绿=弱（A股习惯），以 0 为中心对称染色
+            sty = sty.background_gradient(cmap="RdYlGn_r", subset=excess_cols,
+                                          vmin=-float(lim), vmax=float(lim))
+        st.dataframe(sty, use_container_width=True)
+        st.caption(excess_note + "　排名 1 = 该窗口超额收益最高（仅在所选板块内排）。"
+                   "指标为「—」的板块是日K不足该窗口（新板块/长期停牌），不参与排名。")
+
+    # ---------- 热度分排名 ----------
+    with tab_hot:
+        st.markdown(f"**热度分 = w₁·z({HOTNESS_WINDOW}日超额收益) + w₂·z({HOTNESS_FLOW_PERIOD}资金净额)**")
+        with st.spinner("计算热度分…"):
+            hot = hotness(sel_codes)
+        if hot.empty:
+            st.warning("热度分算不出来（板块日K与资金流都取不到）。")
+        else:
+            w = hot.attrs.get("weights", {})
+            st.caption(f"两项都在所选板块内做 z-score，权重 w₁={w.get('excess_20d', 1.0)}、"
+                       f"w₂={w.get('net_20d', 1.0)}（改 config/settings.py::SECTOR_HOTNESS_WEIGHTS 即生效）。"
+                       "「热门」写成公式而不交给模型判断：模型对「热门」的理解每次会飘，而你看不出来。")
+            show = hot.drop(columns=["code"])
+            ex_col, net_col = col_excess(HOTNESS_WINDOW), f"{HOTNESS_WINDOW}日资金净额"
+            st.dataframe(
+                show.style.format({ex_col: "{:+.2f}", net_col: "{:+.2f}",
+                                   "z_超额": "{:+.2f}", "z_资金": "{:+.2f}",
+                                   "热度分": "{:+.3f}"}, na_rep="—")
+                    .map(_signed_color, subset=[ex_col, net_col, "热度分"]),
+                use_container_width=True,
+            )
+            missing = show[show["备注"] != ""]
+            if not missing.empty:
+                st.caption("⚠️ 以下板块有分项缺失，**热度分为空而不是 0**（当 0 会被排到中间，"
+                           "看起来像「不冷不热」，那是假的）：" +
+                           "；".join(f"{i}——{r['备注']}" for i, r in missing.iterrows()))
+            plot = hot.dropna(subset=["热度分"]).sort_values("热度分")
+            if not plot.empty:
+                fig = go.Figure()
+                for col, name, color in (("z_超额", f"z({HOTNESS_WINDOW}日超额)", "#2196F3"),
+                                         ("z_资金", f"z({HOTNESS_FLOW_PERIOD}资金净额)", "#FF6F00")):
+                    fig.add_trace(go.Bar(y=list(plot.index), x=plot[col], name=name,
+                                         orientation="h", marker_color=color))
+                fig.update_layout(barmode="relative", height=max(320, 34 * len(plot) + 140),
+                                  margin=dict(l=10, r=10, t=30, b=10),
+                                  xaxis_title="z 分项（叠加=热度分）",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.01))
+                st.plotly_chart(fig, use_container_width=True)
+
+    # ---------- 轮动提示 ----------
+    with tab_sig:
+        if SHORT_WINDOW not in windows or LONG_WINDOW not in windows:
+            st.info(f"轮动标签用 {SHORT_WINDOW} 日与 {LONG_WINDOW} 日的排名迁移判定，"
+                    f"请在左侧同时选上这两个窗口。")
+        else:
+            sigs = rotation_signals(mom, short=SHORT_WINDOW, long=LONG_WINDOW)
+            st.caption(f"判定阈值写死在 analysis/rotation.py：排名迁移以「池内 1/3 名次」为界，"
+                       f"边界达到即触发；一个板块只给一个标签（优先级 {' > '.join(LABELS)}）。"
+                       + excess_note)
+            if not sigs:
+                st.caption("当前所选板块没有触发任何轮动标签（也可能是日K数据不足）。")
+            for label in LABELS:
+                group = [s for s in sigs if s["label"] == label]
+                if not group:
+                    continue
+                color = _label_badge_color(label)
+                st.markdown(
+                    f'<span style="display:inline-block;background:{color};color:#fff;'
+                    f'border-radius:10px;padding:2px 10px;margin:6px 6px 4px 0;'
+                    f'font-size:14px">{label} · {len(group)}</span>',
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(
+                    pd.DataFrame([{
+                        "板块": s["sector"],
+                        f"{SHORT_WINDOW}日超额%": s["excess_short"],
+                        f"{LONG_WINDOW}日超额%": s["excess_long"],
+                        f"{SHORT_WINDOW}日排名": s["rank_short"],
+                        f"{LONG_WINDOW}日排名": s["rank_long"],
+                        "名次变化": s["rank_change"],
+                        "依据": s["detail"],
+                    } for s in group]).style.format({
+                        f"{SHORT_WINDOW}日超额%": "{:+.2f}", f"{LONG_WINDOW}日超额%": "{:+.2f}",
+                        f"{SHORT_WINDOW}日排名": "{:.0f}", f"{LONG_WINDOW}日排名": "{:.0f}",
+                        "名次变化": "{:+.0f}",
+                    }, na_rep="—"),
+                    hide_index=True, use_container_width=True,
+                )
+
+
 # ========== 页面路由 ==========
 
-pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块相关性", "自定义策略"]
+pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块相关性", "板块轮动",
+         "自定义策略"]
 default_page = st.session_state.get("page", "全局信号总览")
 default_idx = pages.index(default_page) if default_page in pages else 0
 
@@ -2019,5 +2239,7 @@ elif page == "股票池管理":
     page_manage()
 elif page == "板块相关性":
     page_sector_correlation()
+elif page == "板块轮动":
+    page_sector_rotation()
 else:
     page_custom_strategy()
