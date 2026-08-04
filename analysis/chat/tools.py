@@ -420,7 +420,11 @@ def _sector_pick(args: dict) -> dict:
     } for c in res["candidates"][:MAX_ROWS]]
     return {
         "available": True, "sector": res["sector"], "sector_code": code,
-        "kind": res["kind"], "em_board": f"{res['em_name']}({res['em_code']})",
+        "kind": res["kind"],
+        # 跨 kind 命中时把东财那边的归类也带上（#38），否则模型会照着 kind 说错话
+        "em_board": (f"{res['em_name']}({res['em_code']})"
+                     + (f"，东财归类为 {res.get('em_kind')} 板块（与本系统的 "
+                        f"{res['kind']} 口径不同，属正常）" if res.get("cross_kind") else "")),
         "total_constituents": res["total_constituents"], "computed": res["computed"],
         "top_n": res["top_n"], "stale": res["stale"], "fetched_at": res["fetched_at"],
         "sector_return_pct": _clean(res.get("sector_return")),

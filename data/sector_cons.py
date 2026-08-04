@@ -66,6 +66,11 @@ _STRIP_SUFFIXES = ("概念", "板块", "行业")
 
 MATCH_EXACT, MATCH_STRIPPED, MATCH_ALIAS = "exact", "stripped", "alias"
 
+# 跨 kind 命中时 match_level 写成 `exact@concept` 这种形状（#38）：页面得能说出
+# 「东财把它归在概念板块」，否则一个 industry 板块给出 concept 的成分股会像是配错了
+CROSS_SEP = "@"
+OTHER_KIND = {"industry": "concept", "concept": "industry"}
+
 # 上一次成功的 (分片, 协议) 先试，省掉每次都从头轮 20 个必挂的组合
 _last_good: tuple[int, str] | None = None
 
@@ -233,8 +238,9 @@ def _suffix_variants(name: str) -> list[str]:
     return [c for c in out if c != name]
 
 
-def match_em_board(ths_name: str, board_map: dict) -> dict | None:
-    """THS 板块名 → 东财板块，四级逐级降级，**匹配不上就返回 None**。
+def match_em_board(ths_name: str, board_map: dict, kind: str | None = None,
+                   cross: bool = False) -> dict | None:
+    """THS 板块名 → **单个**东财名录里的板块，四级逐级降级，匹配不上返回 None。
 
     1. 精确匹配 THS 名 == 东财名
     2. 后缀归一后精确匹配：去掉尾部 `概念`/`板块`/`行业`（`锂电池概念` → `锂电池`），
@@ -245,31 +251,91 @@ def match_em_board(ths_name: str, board_map: dict) -> dict | None:
     **不做编辑距离/包含匹配**：`电池` 包含在 `锂电池概念` 里，但那是两个不同板块，
     静默配错会返回一批完全不相干的股票。
 
-    Returns: `{"em_code", "em_name", "match_level"}` 或 None
+    跨两个 kind 的名录轮询由 `resolve_em_board` 负责（#38），这里只管一份名录。
+    `kind` / `cross` 只用于给返回值打标记，不影响匹配判定。
+
+    Returns: `{"em_code", "em_name", "match_level", "em_kind", "cross_kind"}` 或 None
     """
     if not ths_name or not board_map:
         return None
+
+    def hit(code, name, level):
+        return {"em_code": code, "em_name": name,
+                "match_level": f"{level}{CROSS_SEP}{kind}" if cross and kind else level,
+                "em_kind": kind, "cross_kind": bool(cross)}
+
     if ths_name in board_map:
-        return {"em_code": board_map[ths_name], "em_name": ths_name,
-                "match_level": MATCH_EXACT}
+        return hit(board_map[ths_name], ths_name, MATCH_EXACT)
 
     # 后缀归一是**双向**的：THS 的 `锂电池概念` 对东财的 `锂电池`（去后缀），
     # 而 THS 的 `储能` 对东财的 `储能概念`（加后缀）——实测两个方向都出现。
     # 每个候选仍然是一次精确查表，不是模糊匹配。
     for cand in _suffix_variants(ths_name):
         if cand in board_map:
-            return {"em_code": board_map[cand], "em_name": cand,
-                    "match_level": MATCH_STRIPPED}
+            return hit(board_map[cand], cand, MATCH_STRIPPED)
 
     alias = _load_alias().get(ths_name)
     if alias:
         if str(alias).upper().startswith("BK"):
-            return {"em_code": str(alias).upper(), "em_name": ths_name,
-                    "match_level": MATCH_ALIAS}
+            return hit(str(alias).upper(), ths_name, MATCH_ALIAS)
         if alias in board_map:
-            return {"em_code": board_map[alias], "em_name": alias,
-                    "match_level": MATCH_ALIAS}
-        logger.warning(f"alias 表里 {ths_name} → {alias}，但东财名录里没有 {alias}")
+            return hit(board_map[alias], alias, MATCH_ALIAS)
+        logger.info(f"alias 表里 {ths_name} → {alias}，但这份东财名录里没有 {alias}")
+    return None
+
+
+def _load_map(kind: str, attempts: int = 1, cached_only: bool = False) -> dict | None:
+    """一份名录。`cached_only=True` 时只读缓存、绝不打接口（给页面画按钮用）。"""
+    if cached_only:
+        return _read_cache(os.path.join(_CACHE_DIR, f"board_map_{kind}.json"))
+    return get_em_board_map(kind, attempts=attempts)
+
+
+def _board_maps(kind: str, cached_only: bool = True) -> list[tuple[str, dict]]:
+    """`[(kind, 名录)]`，本 kind 在前。**只给「只读缓存」的场景用**（判断有没有名录、
+    收集候选提示）——读缓存是免费的，取数路径请用 `resolve_em_board` 的懒加载。"""
+    out = []
+    for k in (kind, OTHER_KIND.get(kind)):
+        if not k:
+            continue
+        mapping = _load_map(k, cached_only=cached_only)
+        if mapping:
+            out.append((k, mapping))
+    return out
+
+
+def resolve_em_board(ths_name: str, kind: str, attempts: int = 1,
+                     cached_only: bool = False) -> dict | None:
+    """THS 板块名 → 东财板块，**两个 kind 的名录都查**（#38）。
+
+    为什么必须跨 kind：两家的一级分类口径不对齐。实测东财**行业**名录里根本没有
+    「汽车整车」（它那套是申万式细分：乘用车/商用车/综合乘用车…），而**概念**名录里
+    有一个同名的 `汽车整车`(BK1029)。只查同 kind 的话，池内 `汽车整车`(industry) 会
+    四级全落空，报「去补 alias」——而东财其实有同名板块，只是归在另一个桶里。
+
+    顺序：本 kind 的三级 → 另一个 kind 的三级。本 kind 有同名就用本 kind 的
+    （两边都有同名板块时不该跑到另一个桶里去取）。
+
+    跨 kind 仍然只做**精确 / 后缀归一 / alias**，绝不因此放松成包含或编辑距离匹配：
+    跨 kind 的精确同名远比同 kind 的模糊匹配安全——叫这个名字的板块就是这个板块，
+    东财把它归在哪一类是它自己的分类问题。
+
+    **另一份名录是懒加载的**：本 kind 命中就到此为止，不去取第二份。名录取数是要打
+    限流接口的，绝大多数板块在本 kind 就能命中，眼前多取一份等于把限流暴露翻倍
+    （而且第一次跑就会因为多打一枪把窗口用掉）。
+    """
+    for i, k in enumerate((kind, OTHER_KIND.get(kind))):
+        if not k:
+            continue
+        mapping = _load_map(k, attempts=attempts, cached_only=cached_only)
+        if not mapping:
+            continue      # 这一份取不到（限流）不算失败，接着试另一份
+        got = match_em_board(ths_name, mapping, kind=k, cross=(i > 0))
+        if got:
+            if got["cross_kind"]:
+                logger.info(f"{ths_name}({kind}) 在东财 {k} 名录里命中 "
+                            f"{got['em_name']}({got['em_code']})——两家分类口径不一致")
+            return got
     return None
 
 
@@ -297,13 +363,9 @@ def get_sector_constituents(sector_name: str, kind: str,
     signature 与 issue 里写的 `list[dict] | None` 不同：list 装不下 `stale` 与缓存
     日期，而这两个信息必须传到页面上（"过期的成分股远好过没有"的前提是用户知道它过期了）。
     """
-    board_map = get_em_board_map(kind, attempts=attempts)
-    if not board_map:
-        logger.warning(f"东财 {kind} 板块名录不可用，{sector_name} 无法取成分股")
-        return None
-    matched = match_em_board(sector_name, board_map)
+    matched = resolve_em_board(sector_name, kind, attempts=attempts)
     if not matched:
-        logger.info(f"{sector_name}({kind}) 未匹配到东财板块，跳过成分股"
+        logger.info(f"{sector_name}({kind}) 未匹配到东财板块（两个名录都查过），跳过成分股"
                     f"（可在 config/em_board_alias.json 手工补）")
         return None
 
@@ -313,6 +375,10 @@ def get_sector_constituents(sector_name: str, kind: str,
     def _payload(cons, stale, when):
         return {"sector": sector_name, "em_code": em_code,
                 "em_name": matched["em_name"], "match_level": matched["match_level"],
+                # em_kind/cross_kind 要一路传到页面：跨 kind 命中时得说明「东财把它归在
+                # 概念板块」，不然 industry 板块给出 concept 成分股会像是配错了（#38）
+                "em_kind": matched.get("em_kind"),
+                "cross_kind": bool(matched.get("cross_kind")),
                 "constituents": cons, "fetched_at": when, "stale": stale}
 
     if not force_refresh and _is_fresh(path, CONS_TTL_DAYS):
@@ -358,14 +424,26 @@ def _num(v) -> float | None:
 SUGGEST_LIMIT = 6
 
 
+def _kind_note(matched: dict) -> str:
+    """跨 kind 命中时给页面一句解释；同 kind 返回空串（#38）"""
+    if not matched.get("cross_kind"):
+        return ""
+    label = "概念" if matched.get("em_kind") == "concept" else "行业"
+    return f"（东财把它归在{label}板块，两家分类口径不一致）"
+
+
 def suggest_em_names(sector_name: str, board_map: dict,
                      limit: int = SUGGEST_LIMIT) -> list[str]:
     """匹配失败时给**人**看的候选东财板块名（共享至少 2 个连续汉字），按共享片段多的排前。
 
     **匹配逻辑永不使用这个函数**——它只进提示文案。区别在于谁来定夺：自动匹配一旦用上
     包含关系就会静默配错（`电池` vs `锂电池概念`），而这里是把候选摆出来让人挑一个写进
-    alias 表。实测「汽车整车」在东财名录里没有同名板块，候选是 乘用车/商用车/汽车 一类，
-    选哪个是业务判断，代码不该猜。
+    alias 表。
+
+    别指望它多聪明：它按二字词命中，语义近邻给不出（`汽车整车` 与 `乘用车`/`商用车`
+    没有共同二字，实测候选里只有 `汽车*` 系列）。真正该先做的是跨 kind 精确匹配
+    （`resolve_em_board`，#38）——`汽车整车` 本来就在东财**概念**名录里有同名板块，
+    只有两边名录都没有同名时才轮到这些候选。
     """
     if not sector_name or not board_map:
         return []
@@ -388,23 +466,34 @@ def unavailable_reason(sector_name: str, kind: str) -> str:
 
     三种情形要分开说：名录取不到（等限流窗口/夜间 job）、名字没匹配上（去补 alias）、
     成分股取不到且无缓存（等限流窗口）。只读缓存，不额外打接口。
+
+    「名字没匹配上」这条要说明**行业与概念两个名录都查过了**（#38）：只说「东财名录里
+    没有」，而实际只查了一个桶，会把人引到 alias 表去补一个本来不需要的映射。
     """
-    path_map = os.path.join(_CACHE_DIR, f"board_map_{kind}.json")
-    board_map = _read_cache(path_map) if os.path.exists(path_map) else None
-    if not board_map:
+    maps = _board_maps(kind, cached_only=True)
+    if not maps:
         return ("东财板块名录还没取到（接口限流窗口），夜间 job 会重试；"
                 "也可以点下面的「重试取数」多等一会儿")
-    matched = match_em_board(sector_name, board_map)
+    matched = resolve_em_board(sector_name, kind, cached_only=True)
     if not matched:
-        reason = (f"未能匹配到东财板块：东财名录里没有「{sector_name}」，也没有去/加"
-                  f"「概念/板块/行业」后缀的同名板块。请在 config/em_board_alias.json 里加一行"
+        checked = "、".join(k for k, _ in maps)
+        reason = (f"未能匹配到东财板块：东财的 {checked} 名录里都没有「{sector_name}」，"
+                  f"去/加「概念/板块/行业」后缀也没有同名板块。"
+                  f"请在 config/em_board_alias.json 里加一行"
                   f'「"{sector_name}": "东财板块名或BK代码"」')
-        hints = suggest_em_names(sector_name, board_map)
+        hints = []
+        for _, mapping in maps:
+            for name in suggest_em_names(sector_name, mapping):
+                if name not in hints:
+                    hints.append(name)
         if hints:
             # 只是候选，**系统不会自动采用**——口径要人来定（乘用车 ≠ 汽车整车 ≠ 汽车）
-            reason += f"。名字沾边的东财板块（需人工确认，系统不会自动采用）：{'、'.join(hints)}"
+            reason += (f"。名字沾边的东财板块（需人工确认，系统不会自动采用）："
+                       f"{'、'.join(hints[:SUGGEST_LIMIT])}")
         return reason
-    return (f"已匹配东财 {matched['em_name']}({matched['em_code']})，但成分股取数失败"
+    where = (f"（东财把它归在{'概念' if matched.get('em_kind') == 'concept' else '行业'}板块）"
+             if matched.get("cross_kind") else "")
+    return (f"已匹配东财 {matched['em_name']}({matched['em_code']}){where}，但成分股取数失败"
             f"且本地没有任何缓存（接口限流），夜间 job 会重试")
 
 
@@ -422,29 +511,31 @@ def cached_status(sector_name: str, kind: str) -> dict:
     再等限流窗口也没用，得去补 alias），其余三种都允许点击现场取数——没有缓存不等于
     取不到，第一次用总得有人去打那一枪。
 
-    Returns: `{"state", "reason", "count", "fetched_at", "stale", "em_code", "em_name"}`
+    Returns: `{"state", "reason", "count", "fetched_at", "stale", "em_code", "em_name",
+    "em_kind", "cross_kind"}`
     """
     out = {"state": STATE_NO_MAP, "reason": "", "count": None,
-           "fetched_at": None, "stale": False, "em_code": None, "em_name": None}
-    map_path = os.path.join(_CACHE_DIR, f"board_map_{kind}.json")
-    board_map = _read_cache(map_path) if os.path.exists(map_path) else None
-    if not board_map:
+           "fetched_at": None, "stale": False, "em_code": None, "em_name": None,
+           "em_kind": None, "cross_kind": False}
+    if not _board_maps(kind, cached_only=True):
         out["reason"] = "东财板块名录还没取到，点「选股」会现场尝试取数（可能撞上限流窗口）"
         return out
 
-    matched = match_em_board(sector_name, board_map)
+    matched = resolve_em_board(sector_name, kind, cached_only=True)
     if not matched:
         out["state"] = STATE_UNMATCHED
         out["reason"] = unavailable_reason(sector_name, kind)
         return out
     out["em_code"], out["em_name"] = matched["em_code"], matched["em_name"]
+    out["em_kind"], out["cross_kind"] = matched.get("em_kind"), matched["cross_kind"]
 
     cons_path = os.path.join(_CACHE_DIR, f"cons_{matched['em_code']}.json")
     cached = _read_cache(cons_path) if os.path.exists(cons_path) else None
     if not cached:
         out["state"] = STATE_NO_CACHE
-        out["reason"] = (f"已匹配东财 {matched['em_name']}({matched['em_code']})，但还没有"
-                         f"成分股缓存，点「选股」会现场取数（可能撞上限流窗口）")
+        out["reason"] = (f"已匹配东财 {matched['em_name']}({matched['em_code']})"
+                         f"{_kind_note(matched)}，但还没有成分股缓存，"
+                         f"点「选股」会现场取数（可能撞上限流窗口）")
         return out
     out.update({
         "state": STATE_CACHED, "count": len(cached),
