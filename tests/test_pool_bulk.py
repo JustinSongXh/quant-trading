@@ -146,8 +146,12 @@ def test_pages_merged_and_legacy_session_mapped():
     at.run()
     assert not at.exception, at.exception
     page_radio = at.sidebar.radio[0]
+    # 「板块分析」是 #37 合并后的那一页（原「板块相关性」+「板块轮动」）；
+    # 末尾的「AI 分析助手」是 #36 加的，与本用例无关，但列表要跟着实际页面走
     assert list(page_radio.options) == ["全局信号总览", "单股票分析", "新闻列表",
-                                        "股票池管理", "板块分析", "自定义策略"], page_radio.options
+                                        "股票池管理", "板块分析", "自定义策略",
+                                        "AI 分析助手"], page_radio.options
+    assert "板块相关性" not in page_radio.options and "板块轮动" not in page_radio.options
     assert page_radio.value == "板块分析", "旧的「板块相关性」应映射到合并后的页"
     assert [t.value for t in at.title] == ["板块分析"]
 
@@ -158,7 +162,8 @@ def test_pages_merged_and_legacy_session_mapped():
     at2 = view.set_value("轮动").run()
     assert not at2.exception, at2.exception
     assert len(at2.tabs) == 4, "轮动视图 4 个 tab"
-    print("[OK] 侧边栏 6 页含「板块分析」，旧 session 值映射，两个视图各渲染无异常")
+    print("[OK] 侧边栏含「板块分析」（旧的两页已合并），旧 session 值映射，"
+          "两个视图各渲染无异常")
 
 
 def test_no_stale_page_names_left():

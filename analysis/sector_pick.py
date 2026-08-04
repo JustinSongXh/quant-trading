@@ -103,23 +103,29 @@ def flag_score(flags: list[str] | None) -> tuple[float, list[str]]:
     return round(score, 3), unknown
 
 
-def _get_stock_kline(code: str, days: int = KLINE_DAYS,
+def _get_stock_kline(code: str, days: int = KLINE_DAYS, stock_type: str = "stock",
                      force_refresh: bool = False) -> pd.DataFrame:
-    """个股日K，缓存键与用法同 app.get_stock_data 的个股分支（不依赖 app.py，
-    避免导入触发 Streamlit 脚本执行；写法与 correlation._get_sector_kline 一致）。"""
-    if not force_refresh and is_cache_fresh(code):
-        df = load_kline(code)
+    """个股/指数日K，缓存键与用法同 app.get_stock_data（不依赖 app.py，避免导入触发
+    Streamlit 脚本执行；写法与 correlation._get_sector_kline 一致）。
+
+    选股只用得上 stock_type="stock"；index 分支是给 #36 的对话工具复用的——指数与个股
+    的取数/缓存逻辑一模一样，只差 cache key 前缀，没必要再抄一份。板块另有
+    correlation._get_sector_kline（带板块专属的取数分支）。
+    """
+    cache_key = f"idx_{code}" if stock_type == "index" else code
+    if not force_refresh and is_cache_fresh(cache_key):
+        df = load_kline(cache_key)
         if df is not None and not df.empty and \
                 (df.index.max() - df.index.min()).days >= days - 7:
             return df
     try:
-        df = fetch_daily_kline(code, days=days, stock_type="stock")
+        df = fetch_daily_kline(code, days=days, stock_type=stock_type)
         if df is not None and not df.empty:
-            save_kline(code, df)
+            save_kline(cache_key, df)
             return df
     except Exception as e:
         logger.info(f"{code} 日K取数失败: {e}")
-    df = load_kline(code)
+    df = load_kline(cache_key)
     return df if df is not None else pd.DataFrame()
 
 
