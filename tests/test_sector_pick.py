@@ -463,8 +463,10 @@ def test_pick_panel_is_wired_into_hotness_tab():
     src = open(os.path.join(root, "app.py"), encoding="utf-8").read()
     assert "_render_sector_pick_panel(hot)" in src, "选股入口应挂在热度分排名下方"
     assert "def _render_sector_pick_panel" in src and "def _render_sector_pick_result" in src
-    assert 'pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块分析", "自定义策略"]' \
-        in src, "#35 不新增页面"
+    # #35 不新增页面：选股挂在「板块分析」页里，不许出现「板块选股」这类新页
+    pages_line = next(ln for ln in src.splitlines() if ln.startswith("pages = ["))
+    assert '"板块分析"' in pages_line, pages_line
+    assert "选股" not in pages_line, f"#35 不该新增页面：{pages_line}"
     assert "refresh_pool_constituents" in src, "成分股夜间刷新 job 应挂在 APScheduler 上"
 
 
