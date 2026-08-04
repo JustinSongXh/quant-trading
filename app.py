@@ -7,6 +7,7 @@ import pandas as pd
 
 from config.settings import (
     load_stock_pool, get_stock_name, get_stock_type, add_stock, remove_stock,
+    add_stocks, remove_stocks,
     DEFAULT_SIGNAL_SOURCE, SIGNAL_THRESHOLD, SIGNAL_LOOKBACK,
 )
 from data.fetcher import fetch_daily_kline, is_hk_stock, is_index
@@ -1222,10 +1223,7 @@ def page_manage():
         a_pool = [s for s in pool if s.get("market", "A") == "A" and s.get("type") not in ("index", "sector")]
         hk_pool = [s for s in pool if s.get("market") == "HK"]
 
-        for label, sub_pool in [("指数", idx_pool), ("板块", sector_pool), ("A股", a_pool), ("港股", hk_pool)]:
-            if not sub_pool:
-                continue
-            st.markdown(f"**{label}**（{len(sub_pool)} 只）")
+        def _render_pool_rows(sub_pool):
             for s in sub_pool:
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"{s['name']}（{s['code']}）")
@@ -1233,6 +1231,17 @@ def page_manage():
                 if c2.button("移除", key=f"del_{s['code']}_{stype}"):
                     remove_stock(s["code"], stock_type=stype)
                     st.rerun()
+
+        for label, sub_pool in [("指数", idx_pool), ("板块", sector_pool), ("A股", a_pool), ("港股", hk_pool)]:
+            if not sub_pool:
+                continue
+            # 批量加板块后这一组可能有几百项，全平铺会把页面撑满（#37）
+            if len(sub_pool) > 20:
+                with st.expander(f"**{label}**（{len(sub_pool)} 只，展开逐个移除）"):
+                    _render_pool_rows(sub_pool)
+            else:
+                st.markdown(f"**{label}**（{len(sub_pool)} 只）")
+                _render_pool_rows(sub_pool)
 
         # 手动输入添加
         st.markdown("---")
@@ -1325,24 +1334,51 @@ def page_manage():
             st.info(f"暂无{kind_label[kind]}板块数据，点「刷新列表」重试。")
         else:
             in_pool_codes = {p["code"] for p in pool if p.get("type") == "sector"}
-            st.caption(f"{kind_label[kind]}板块共 {len(subset)} 个（下拉框可输入关键字过滤）")
-            options = {f"{s['name']}（{s['code']}）": s for s in subset}
-            pick_cols = st.columns([3, 1])
-            chosen = pick_cols[0].selectbox("选择板块", list(options.keys()), key="sector_pick")
-            s = options[chosen]
-            if s["code"] in in_pool_codes:
-                pick_cols[1].markdown('<span style="color:#27ae60">✓ 已添加</span>', unsafe_allow_html=True)
-            elif pick_cols[1].button("添加", key="add_picked_sector"):
-                add_stock(s["code"], s["name"], "A", stock_type="sector", sector_kind=s["kind"])
+            not_in_pool = [s for s in subset if s["code"] not in in_pool_codes]
+            st.caption(f"{kind_label[kind]}板块共 {len(subset)} 个，其中 {len(not_in_pool)} 个还没加进池子"
+                       "（多选框可输入关键字过滤，可一次选多个）")
+
+            # ---- 多选批量添加（#37）----
+            options = {f"{s['name']}（{s['code']}）": s for s in not_in_pool}
+            picked = st.multiselect("选择板块（可多选）", list(options.keys()), key="sector_pick_multi")
+            pick_cols = st.columns([1, 1, 2])
+            if pick_cols[0].button(f"添加所选（{len(picked)}）", key="add_picked_sectors",
+                                   disabled=not picked):
+                n = add_stocks([{"code": options[p]["code"], "name": options[p]["name"],
+                                 "market": "A", "type": "sector",
+                                 "sector_kind": options[p]["kind"]} for p in picked])
+                st.success(f"已添加 {n} 个{kind_label[kind]}板块")
                 st.rerun()
+            if pick_cols[1].button(f"添加全部{kind_label[kind]}板块（{len(not_in_pool)}）",
+                                   key="add_all_sectors", disabled=not not_in_pool):
+                n = add_stocks([{"code": s["code"], "name": s["name"], "market": "A",
+                                 "type": "sector", "sector_kind": s["kind"]}
+                                for s in not_in_pool])
+                st.success(f"已添加 {n} 个{kind_label[kind]}板块")
+                st.rerun()
+            same_kind_in_pool = [p for p in pool if p.get("type") == "sector"
+                                 and p.get("sector_kind", "industry") == kind]
+            if pick_cols[2].button(f"移除池内全部{kind_label[kind]}板块（{len(same_kind_in_pool)}）",
+                                   key="del_all_sectors", disabled=not same_kind_in_pool):
+                n = remove_stocks([(p["code"], "sector") for p in same_kind_in_pool])
+                st.success(f"已移除 {n} 个{kind_label[kind]}板块")
+                st.rerun()
+
+            # 批量加板块的代价必须写在按钮边上：板块没有批量行情接口，总览页要逐个取 THS 快照
+            st.caption("⚠️ 板块加进池子就会进「全局信号总览」，而板块**没有批量行情接口**，"
+                       "总览页每次刷新要给每个板块单独取一次同花顺快照（实测行业 0.7~1.1s、概念 3.9s，"
+                       "60 秒内复用）。参考：10 个板块秒级；90 个（全部行业）约 1~2 分钟；"
+                       "465 个（行业+概念）约 5~20 分钟。板块分析只需要少量板块的话，别全量加。")
 
             # 全量清单（可滚动浏览，不知道名字时直接翻）
             with st.expander(f"展开浏览全部 {kind_label[kind]}板块清单"):
                 st.dataframe(
-                    pd.DataFrame([{"名称": x["name"], "代码": x["code"]} for x in subset]),
+                    pd.DataFrame([{"名称": x["name"], "代码": x["code"],
+                                   "在池内": "✓" if x["code"] in in_pool_codes else ""}
+                                  for x in subset]),
                     use_container_width=True, hide_index=True,
                 )
-        st.caption("板块来自东方财富行业/概念板块。添加后出现在概览页「板块」分类，可点详情做信号/回测分析。")
+        st.caption("板块来自同花顺行业/概念板块。添加后出现在概览页「板块」分类与「板块分析」页，可点详情做信号/回测分析。")
 
 
 # ========== 自定义策略页 ==========
@@ -1883,50 +1919,16 @@ def page_custom_strategy():
         st.info("回测期间无交易发生（信号源未触发建仓，或策略未满足进出仓条件）。")
 
 
-def page_sector_correlation():
-    """板块相关性分析：热力图 + 单板块联动榜 + 负相关对冲榜（#29）"""
+def _render_sector_correlation(sel_codes, name_by_code):
+    """板块相关性视图：热力图 + 单板块联动榜 + 负相关对冲榜（#29，#37 合页后只收板块列表）"""
     from analysis.correlation import (
         corr_matrix, linkage_ranking, hedge_pairs, cluster_order, VALID_WINDOWS,
     )
 
-    st.title("板块相关性")
     st.caption("对一组板块的日收益率两两算相关系数：谁同涨同跌（正相关抱团）、谁反向（负相关可对冲/轮动）。")
 
-    stocks = load_stock_pool()
-    pool_sectors = [s for s in stocks if s.get("type") == "sector"]
-    if not pool_sectors:
-        st.info("股票池里还没有板块。请到「股票池管理」页添加行业/概念板块后再来分析。")
-        return
-
-    # 默认分析股票池内的板块；可从全量板块补充加入本次分析（仅本次，不入池）
-    name_by_code = {s["code"]: s["name"] for s in pool_sectors}
-    default_codes = list(name_by_code.keys())
-
-    extra_codes = []
-    with st.expander("＋ 从全量板块加入本次分析（仅本次，不写入股票池）"):
-        from data.sector_list import get_sector_list, sector_list_available
-        if not sector_list_available():
-            st.caption("尚无板块列表缓存，去「股票池管理」页刷新一次板块列表即可。")
-        else:
-            all_sectors = get_sector_list()
-            # 排除已在池里的，避免重复
-            extra_opts = {f"{s['name']}({s['code']}·{'行业' if s['kind']=='industry' else '概念'})": s["code"]
-                          for s in all_sectors if s["code"] not in name_by_code}
-            picked = st.multiselect("追加板块", list(extra_opts.keys()), key="corr_extra")
-            for label in picked:
-                code = extra_opts[label]
-                extra_codes.append(code)
-                # 补进名称映射（get_stock_name 只认池里的，这里给列名兜底）
-                name_by_code.setdefault(code, label.split("(")[0])
-
-    all_codes = default_codes + extra_codes
-
-    sel_labels = st.multiselect(
-        "参与分析的板块",
-        [f"{name_by_code[c]}({c})" for c in all_codes],
-        default=[f"{name_by_code[c]}({c})" for c in default_codes],
-        key="corr_selected",
-    )
+    sel_labels = [f"{name_by_code[c]}({c})" for c in sel_codes]
+    label_to_code = dict(zip(sel_labels, sel_codes))
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
         window = st.radio("窗口（交易日）", VALID_WINDOWS, index=1, horizontal=True, key="corr_window")
@@ -1943,11 +1945,8 @@ def page_sector_correlation():
     method = "spearman" if method_label.startswith("Spearman") else "pearson"
     mode = {"原始相关": "raw", "剔除大盘（沪深300）": "index", "剔除板块均值": "cross"}[mode_label]
 
-    label_to_code = {f"{name_by_code[c]}({c})": c for c in all_codes}
-    sel_codes = [label_to_code[l] for l in sel_labels if l in label_to_code]
-
     if len(sel_codes) < 2:
-        st.info("请至少选择 2 个板块。")
+        st.info("相关性至少需要 2 个板块，请在左侧多选一个。")
         return
 
     with st.spinner("计算中（首次取数可能较慢）…"):
@@ -2008,7 +2007,7 @@ def page_sector_correlation():
             st.caption("无数据")
 
 
-# ========== 板块轮动页（issue #34） ==========
+# ========== 板块轮动视图（issue #34） ==========
 
 def _signed_color(v):
     """正红负绿（沿用全站涨跌配色）；缺失值灰"""
@@ -2027,7 +2026,8 @@ def _label_badge_color(label):
             LABEL_FADING: "#27ae60", LABEL_LAGGARD: "#7f8c8d"}.get(label, "#7f8c8d")
 
 
-def page_sector_rotation():
+def _render_sector_rotation(sel_codes, name_by_code):
+    """板块轮动视图（#34，#37 合页后板块选择由 page_sector_analysis 统一给）"""
     from analysis.rotation import (
         HOTNESS_FLOW_PERIOD, HOTNESS_WINDOW, LABELS, LONG_WINDOW, SHORT_WINDOW,
         VALID_WINDOWS, col_excess, col_rank, col_ret, hotness, momentum_table,
@@ -2035,28 +2035,17 @@ def page_sector_rotation():
     )
     from data.fund_flow import LIVE_PERIOD, VALID_PERIODS, sector_fund_flow_ranking
 
-    st.title("板块轮动")
     st.caption("板块相对强弱的排名迁移 + 资金流佐证：谁在持续走强、谁刚新晋走强、谁在转弱。"
                "全是确定性计算，不产生交易信号、不进回测。")
 
-    pool_sectors = [s for s in load_stock_pool() if s.get("type") == "sector"]
-    name_by_code = {s["code"]: s["name"] for s in pool_sectors}
-
-    # 动量/热度只算池内板块：板块日K要逐个取，全市场 470+ 个板块全算不现实。
-    # 资金流排行反而是全市场——它一次调用就返回全部且已排序，是免费的。
-    st.sidebar.markdown("**动量 / 热度分范围**")
-    sel_labels = st.sidebar.multiselect(
-        "池内板块", [f"{n}({c})" for c, n in name_by_code.items()],
-        default=[f"{n}({c})" for c, n in name_by_code.items()], key="rot_sectors",
-    )
-    label_to_code = {f"{n}({c})": c for c, n in name_by_code.items()}
-    sel_codes = [label_to_code[l] for l in sel_labels if l in label_to_code]
-    windows = st.sidebar.multiselect("动量窗口（交易日）", list(VALID_WINDOWS),
-                                     default=list(VALID_WINDOWS), key="rot_windows")
+    # 动量/热度只算所选板块（板块日K要逐个取）；资金流排行那个 tab 是全市场，
+    # 因为它一次调用就返回全部且已排序，是免费的。
+    windows = st.multiselect("动量窗口（交易日）", list(VALID_WINDOWS),
+                             default=list(VALID_WINDOWS), key="rot_windows")
     windows = tuple(sorted(windows))
 
     tab_flow, tab_mom, tab_hot, tab_sig = st.tabs(
-        ["资金流排行（全市场）", "池内板块动量", "热度分排名", "轮动提示"]
+        ["资金流排行（全市场）", "所选板块动量", "热度分排名", "轮动提示"]
     )
 
     # ---------- 资金流排行（全市场） ----------
@@ -2102,13 +2091,9 @@ def page_sector_rotation():
                        "接口内部是分页抓的，板块条数每次会有出入，个别板块可能整批缺失。"
                        + ("N日档没有领涨股/当前价字段，接口本身不返回。" if not live else ""))
 
-    if not pool_sectors:
-        with tab_mom:
-            st.info("股票池里还没有板块。请到「股票池管理」页添加行业/概念板块，动量与热度分才能算。")
-        return
     if not sel_codes or not windows:
         with tab_mom:
-            st.info("请在左侧选择至少 1 个板块和 1 个动量窗口。")
+            st.info("请在左侧选择至少 1 个板块，并在上方选至少 1 个动量窗口。")
         return
 
     with st.spinner("计算板块动量（首次取板块日K可能较慢）…"):
@@ -2118,9 +2103,9 @@ def page_sector_rotation():
     excess_note = ("超额收益 = 板块累计收益 − 沪深300 同窗口累计收益。" if index_ok else
                    "⚠️ 沪深300 数据取不到，「超额」列此刻实际是**绝对收益**（已降级）。")
 
-    # ---------- 池内板块动量矩阵 ----------
+    # ---------- 所选板块动量矩阵 ----------
     with tab_mom:
-        st.markdown("**行=板块，列=各窗口超额收益与池内排名**")
+        st.markdown(f"**行=板块，列=各窗口超额收益与排名（在所选 {len(sel_codes)} 个板块内排）**")
         show = mom.drop(columns=["code"])
         excess_cols = [col_excess(w) for w in windows]
         fmt = {}
@@ -2185,7 +2170,8 @@ def page_sector_rotation():
                     f"请在左侧同时选上这两个窗口。")
         else:
             sigs = rotation_signals(mom, short=SHORT_WINDOW, long=LONG_WINDOW)
-            st.caption(f"判定阈值写死在 analysis/rotation.py：排名迁移以「池内 1/3 名次」为界，"
+            st.caption(f"判定阈值写死在 analysis/rotation.py：排名迁移以「所选板块内 1/3 名次」为界"
+                       f"（当前 {len(sel_codes)} 个板块 → {max(1.0, len(sel_codes) / 3):.1f} 名），"
                        f"边界达到即触发；一个板块只给一个标签（优先级 {' > '.join(LABELS)}）。"
                        + excess_note)
             if not sigs:
@@ -2219,11 +2205,51 @@ def page_sector_rotation():
                 )
 
 
+# ========== 板块分析页（issue #37：合并相关性与轮动） ==========
+
+SECTOR_VIEWS = ("相关性", "轮动")
+
+
+def page_sector_analysis():
+    """板块分析：相关性与轮动两个视图共用一份板块选择（#37）
+
+    两页合一的收益就在这里——板块只选一次，切视图不用重选；侧边栏也从 7 项回到 6 项。
+    """
+    st.title("板块分析")
+
+    pool_sectors = [s for s in load_stock_pool() if s.get("type") == "sector"]
+    if not pool_sectors:
+        st.info("股票池里还没有板块。请到「股票池管理」页添加行业/概念板块（支持一键批量添加）后再来分析。")
+        return
+
+    name_by_code = {s["code"]: s["name"] for s in pool_sectors}
+    labels = [f"{n}({c})" for c, n in name_by_code.items()]
+    label_to_code = {f"{n}({c})": c for c, n in name_by_code.items()}
+
+    st.sidebar.markdown("**参与分析的板块**")
+    sel_labels = st.sidebar.multiselect(f"池内板块（共 {len(labels)} 个）", labels,
+                                        default=labels, key="sec_sectors")
+    sel_codes = [label_to_code[l] for l in sel_labels if l in label_to_code]
+    if not sel_codes:
+        st.info("请在左侧至少选择 1 个板块。")
+        return
+
+    view = st.radio("视图", SECTOR_VIEWS, horizontal=True, key="sec_view",
+                    help="两个视图用同一份板块选择：相关性看谁与谁同涨同跌，轮动看相对强弱的排名迁移。")
+    if view == "相关性":
+        _render_sector_correlation(sel_codes, name_by_code)
+    else:
+        _render_sector_rotation(sel_codes, name_by_code)
+
+
 # ========== 页面路由 ==========
 
-pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块相关性", "板块轮动",
-         "自定义策略"]
+pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块分析", "自定义策略"]
+# #37 前是两页（板块相关性 / 板块轮动）；老 session 里存的旧值映射到合并后的页，
+# 否则重新打开会莫名落回第一页
+_LEGACY_PAGES = {"板块相关性": "板块分析", "板块轮动": "板块分析"}
 default_page = st.session_state.get("page", "全局信号总览")
+default_page = _LEGACY_PAGES.get(default_page, default_page)
 default_idx = pages.index(default_page) if default_page in pages else 0
 
 page = st.sidebar.radio("页面", pages, index=default_idx)
@@ -2237,9 +2263,7 @@ elif page == "新闻列表":
     page_news_list()
 elif page == "股票池管理":
     page_manage()
-elif page == "板块相关性":
-    page_sector_correlation()
-elif page == "板块轮动":
-    page_sector_rotation()
+elif page == "板块分析":
+    page_sector_analysis()
 else:
     page_custom_strategy()

@@ -56,31 +56,73 @@ def save_stock_pool(stocks: list[dict]):
         json.dump(stocks, f, ensure_ascii=False, indent=4)
 
 
-def add_stock(code: str, name: str, market: str = "A", stock_type: str = "stock",
-              sector_kind: str | None = None):
-    """添加股票到股票池
-
-    sector_kind 仅 stock_type=="sector" 时使用（industry/concept），决定取数走行业还是概念接口。
-    """
-    pool = load_stock_pool()
-    if any(s["code"] == code and s.get("type", "stock") == stock_type for s in pool):
-        return False  # 已存在
+def _pool_entry(code: str, name: str, market: str = "A", stock_type: str = "stock",
+                sector_kind: str | None = None) -> dict:
+    """构造股票池条目（个股不写 type，指数/板块写 type，板块另写 sector_kind）"""
     entry = {"code": code, "name": name, "market": market}
     if stock_type == "index":
         entry["type"] = "index"
     elif stock_type == "sector":
         entry["type"] = "sector"
         entry["sector_kind"] = sector_kind or "industry"
-    pool.append(entry)
-    save_stock_pool(pool)
-    return True
+    return entry
+
+
+def add_stocks(entries: list[dict]) -> int:
+    """批量添加，**一次 load + 一次 save**，返回真正新增的条数（#37）。
+
+    entries 每项含 code / name，可选 market / type / sector_kind（与 add_stock 同义）。
+    按 (code, type) 判重：已在池里的跳过，entries 自身重复也只进一条。
+    一次加 90 个行业板块不该产生 90 次读写 json。
+    """
+    if not entries:
+        return 0
+    pool = load_stock_pool()
+    have = {(s["code"], s.get("type", "stock")) for s in pool}
+    added = []
+    for e in entries:
+        stype = e.get("type") or e.get("stock_type") or "stock"
+        key = (e["code"], stype)
+        if key in have:
+            continue
+        have.add(key)
+        added.append(_pool_entry(e["code"], e.get("name") or e["code"],
+                                 e.get("market", "A"), stype, e.get("sector_kind")))
+    if not added:
+        return 0
+    save_stock_pool(pool + added)
+    return len(added)
+
+
+def remove_stocks(items: list[tuple[str, str]]) -> int:
+    """批量移除，一次 load + 一次 save。items 为 [(code, stock_type)]，返回删除条数。
+
+    删不存在的项不报错（返回数按实际删掉的算）。
+    """
+    if not items:
+        return 0
+    targets = {(code, stype or "stock") for code, stype in items}
+    pool = load_stock_pool()
+    kept = [s for s in pool if (s["code"], s.get("type", "stock")) not in targets]
+    removed = len(pool) - len(kept)
+    if removed:
+        save_stock_pool(kept)
+    return removed
+
+
+def add_stock(code: str, name: str, market: str = "A", stock_type: str = "stock",
+              sector_kind: str | None = None):
+    """添加股票到股票池
+
+    sector_kind 仅 stock_type=="sector" 时使用（industry/concept），决定取数走行业还是概念接口。
+    """
+    return add_stocks([{"code": code, "name": name, "market": market,
+                        "type": stock_type, "sector_kind": sector_kind}]) == 1
 
 
 def remove_stock(code: str, stock_type: str = "stock"):
     """从股票池删除股票"""
-    pool = load_stock_pool()
-    pool = [s for s in pool if not (s["code"] == code and s.get("type", "stock") == stock_type)]
-    save_stock_pool(pool)
+    remove_stocks([(code, stock_type)])
 
 # ========== 数据配置 ==========
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
