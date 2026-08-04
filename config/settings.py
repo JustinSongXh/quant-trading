@@ -148,6 +148,15 @@ SIGNAL_LOOKBACK = {
     "kronos": 400,      # 匹配 Kronos 模型自身上下文上限
 }
 
+# ========== 板块轮动热度分权重（issue #34）==========
+# 热度分 = excess_20d · z(20日超额收益) + net_20d · z(20日资金净额)，两项都在池内做
+# z-score。「热门」写成公式而不让模型判断：同一个问题问两次模型对「热门」的理解会飘。
+# 想更看重资金还是更看重涨幅，直接改这里的权重，页面下一次计算就生效。
+SECTOR_HOTNESS_WEIGHTS = {
+    "excess_20d": 1.0,
+    "net_20d": 1.0,
+}
+
 # ========== 通知配置 ==========
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 

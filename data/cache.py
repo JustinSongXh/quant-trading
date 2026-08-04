@@ -325,3 +325,99 @@ def update_sentiment_scores(scores: list[dict]) -> int:
     finally:
         conn.close()
     return affected
+
+
+# ========== 板块资金流历史快照（issue #34） ==========
+
+def _ensure_fund_flow_table():
+    """确保 sector_fund_flow_snapshot 表存在。
+
+    资金流没有逐日历史接口（东财的 stock_sector_fund_flow_hist 实测连不上），只能
+    每天收盘后把当日排行落一份下来自己攒。#34 里没有任何功能读这张表，它只负责积累。
+    """
+    _ensure_dir()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sector_fund_flow_snapshot (
+                date          DATE,
+                kind          TEXT,
+                period        TEXT,
+                sector        TEXT,
+                rank          INTEGER,
+                sector_index  DOUBLE,
+                change_pct    DOUBLE,
+                inflow        DOUBLE,
+                outflow       DOUBLE,
+                net           DOUBLE,
+                company_count INTEGER,
+                fetched_at    TIMESTAMP,
+                PRIMARY KEY (date, kind, period, sector)
+            )
+            """
+        )
+    finally:
+        conn.close()
+
+
+def upsert_fund_flow_snapshot(day: date, kind: str, period: str,
+                              rows: list[dict]) -> int:
+    """写入某日某档位的板块资金流排行，返回新增行数。
+
+    rows 为 data/fund_flow.py 归一化后的 schema；资金列单位是**亿元**，原样存。
+    主键 (date, kind, period, sector) 冲突直接跳过——同一天重跑（手动触发/调度重试）
+    不会产生重复行，也不会覆盖当时那份快照。rank 存接口返回的原始顺序（1 起）。
+    """
+    if not rows:
+        return 0
+    _ensure_fund_flow_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    try:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM sector_fund_flow_snapshot"
+        ).fetchone()[0]
+        fetched_at = datetime.now()
+        for i, r in enumerate(rows, start=1):
+            conn.execute(
+                """
+                INSERT INTO sector_fund_flow_snapshot
+                  (date, kind, period, sector, rank, sector_index, change_pct,
+                   inflow, outflow, net, company_count, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (date, kind, period, sector) DO NOTHING
+                """,
+                [day, kind, period, r["sector"], i, r.get("sector_index"),
+                 r.get("change_pct"), r.get("inflow"), r.get("outflow"),
+                 r.get("net"), r.get("company_count"), fetched_at],
+            )
+        after = conn.execute(
+            "SELECT COUNT(*) FROM sector_fund_flow_snapshot"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return after - before
+
+
+def load_fund_flow_snapshot(kind: str | None = None, period: str | None = None,
+                            sector: str | None = None,
+                            since: date | None = None) -> pd.DataFrame:
+    """读快照表（按 date 升序）。目前只有测试和将来的历史分析会用到。"""
+    _ensure_fund_flow_table()
+    conn = duckdb.connect(CACHE_DB_PATH)
+    where, params = [], []
+    for col, val in (("kind", kind), ("period", period), ("sector", sector)):
+        if val is not None:
+            where.append(f"{col} = ?")
+            params.append(val)
+    if since is not None:
+        where.append("date >= ?")
+        params.append(since)
+    sql = "SELECT * FROM sector_fund_flow_snapshot"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY date, kind, period, rank"
+    try:
+        return conn.execute(sql, params).fetchdf()
+    finally:
+        conn.close()
