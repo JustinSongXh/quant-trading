@@ -196,10 +196,69 @@ def _overview_meta_row(code, name, stype, market, signal_df, rt):
     }
 
 
+# 总览页的扫描/显示范围（#28 评论）：类型 → 中文名。港股/A股 都归在「个股」里，
+# 因为代价上的分水岭是「有没有批量行情接口」，而不是市场。
+OVERVIEW_TYPE_LABELS = {"index": "指数", "sector": "板块", "stock": "个股"}
+OVERVIEW_TYPES = tuple(OVERVIEW_TYPE_LABELS)
+# 分组行数超过这个数就改用紧凑表格（一个 dataframe），不再逐行渲染 9 列 + 按钮
+COMPACT_ROWS = 20
+
+
+def _render_overview_compact(market_df, price_label, prev_label, sig_label, market_key):
+    """行数多的分组：一个 dataframe + 一个「看详情」选择器（#28 评论）
+
+    逐行版每行 9 个 st.columns + 1 个按钮，95 行 ≈ 950 个 widget，翻页本身就卡；
+    紧凑版是 1 个 dataframe + 2 个 widget。代价是没有逐行按钮，所以下面配一个选择器
+    ——「详情」这个入口不能因为改表格就消失。
+    """
+    show = pd.DataFrame({
+        "标的": market_df["股票"],
+        price_label: market_df["现价"],
+        prev_label: market_df["昨收"],
+        "涨跌幅%": market_df["涨跌幅"],
+        "市盈率": market_df["市盈率"],
+        sig_label: market_df["信号值"],
+        "推荐": market_df["推荐"],
+        "仓位": market_df["仓位建议"],
+    })
+    # 数值列可能混着 "-"（取数失败的行），先转数字再格式化，否则 Styler 会整列当字符串
+    for col in ("涨跌幅%", sig_label):
+        show[col] = pd.to_numeric(show[col], errors="coerce")
+    st.dataframe(
+        show.style.format({"涨跌幅%": "{:+.2f}", sig_label: "{:+.3f}"}, na_rep="—")
+            .map(_signed_color, subset=["涨跌幅%", sig_label])
+            .map(lambda v: "color:#e74c3c;font-weight:bold" if v == "买入"
+                 else "color:#27ae60;font-weight:bold" if v == "卖出" else "color:#999",
+                 subset=["推荐"]),
+        hide_index=True, use_container_width=True,
+        height=min(560, 36 * len(show) + 40),
+    )
+    labels = list(market_df["股票"])
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        chosen = st.selectbox("看某个标的的详情", labels, key=f"ov_pick_{market_key}",
+                              label_visibility="collapsed")
+    row = market_df[market_df["股票"] == chosen].iloc[0]
+    if c2.button("查看详情", key=f"ov_pick_btn_{market_key}"):
+        st.session_state["page"] = "单股票分析"
+        st.session_state["selected_code"] = row["_code"]
+        st.session_state["selected_type"] = row.get("_type", "stock")
+        st.session_state["auto_analyze"] = True
+        st.rerun()
+    st.caption(f"这一组超过 {COMPACT_ROWS} 个，已改用紧凑表格（逐行按钮会让页面卡）。"
+               "要看某个标的用上面的选择器。")
+
+
 def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
-                      kronos_progress=None, force_refresh_data=False):
-    """扫描股票池，计算指定 source 的信号；signal_df 按 source 缓存到 session_state"""
-    stocks = load_stock_pool()
+                      kronos_progress=None, force_refresh_data=False, types=None):
+    """扫描股票池，计算指定 source 的信号；signal_df 按 source 缓存到 session_state
+
+    `types`：只扫这些标的类型（`{"index","sector","stock"}` 的子集），None = 全扫。
+    未选中的类型**连行情都不请求**——板块没有批量行情接口（#32），95 个板块逐个 THS 快照
+    实测 0.74s/个 ≈ 70s，而个股+指数 26 个一次批量只要 0.2s。只想看个股的人不该等这一分多钟。
+    """
+    stocks = [s for s in load_stock_pool()
+              if types is None or s.get("type", "stock") in types]
     quote_items = [(s["code"], s.get("type", "stock")) for s in stocks]
     realtime = get_realtime_quotes(quote_items)
     total = len(stocks)
@@ -208,6 +267,9 @@ def _scan_all_stocks(progress=None, source=DEFAULT_SIGNAL_SOURCE,
     sig_cache = st.session_state.setdefault("overview_signals", {})
     src_cache = sig_cache.setdefault(source, {})
     meta_cache = {}
+    if not stocks:
+        st.session_state["overview_meta"] = meta_cache
+        return
 
     for i, stock in enumerate(stocks):
         code, name = stock["code"], stock["name"]
@@ -319,8 +381,33 @@ def page_overview():
     st.sidebar.markdown("---")
     need_refresh = st.sidebar.button("刷新数据", type="primary")
 
-    # 股票池指纹：管理页加/删股票后回到总览，靠它触发自动重扫
-    pool_fp = tuple(sorted((s["code"], s.get("type", "stock")) for s in load_stock_pool()))
+    # ---- 扫描/显示范围（#28 评论）：未选中的类型既不扫描也不渲染 ----
+    pool = load_stock_pool()
+    counts = {}
+    for s in pool:
+        counts[s.get("type", "stock")] = counts.get(s.get("type", "stock"), 0) + 1
+    labels = [f"{OVERVIEW_TYPE_LABELS[t]}（{counts.get(t, 0)}）" for t in OVERVIEW_TYPES]
+    label_to_type = dict(zip(labels, OVERVIEW_TYPES))
+    sel_labels = st.multiselect("扫描范围", labels, default=labels, key="ov_types",
+                                help="去掉的类型既不扫描也不显示——收起来并不省时间，"
+                                     "Streamlit 折叠区里的内容照样会渲染。")
+    types = {label_to_type[l] for l in sel_labels if l in label_to_type}
+    n_sector = counts.get("sector", 0) if "sector" in types else 0
+    st.caption(f"个股/指数走一次批量行情（实测 26 个 0.2s）；**板块没有批量接口**"
+               f"（#32），逐个 THS 快照实测 0.74s/个"
+               + (f"，当前选了 {n_sector} 个板块 ≈ {n_sector * 0.74:.0f}s。"
+                  if n_sector else "，当前未选板块。")
+               + "只想看个股时把「板块」去掉，扫描会快一分多钟。")
+    if not types:
+        st.info("扫描范围是空的，请至少选一个类型。")
+        return
+
+    only_signal = st.checkbox("只看有信号的（|信号| ≥ 阈值）", value=False, key="ov_signal_only")
+
+    # 股票池指纹：管理页加/删股票后回到总览，靠它触发自动重扫。
+    # **范围也要进指纹**：否则勾上「板块」后不会重扫，页面上根本不出现板块。
+    pool_fp = (tuple(sorted((s["code"], s.get("type", "stock")) for s in pool)),
+               tuple(sorted(types)))
     pool_changed = st.session_state.get("overview_pool_fp") != pool_fp
 
     # radio 切换：当前 source 没缓存就重算（实际是"选了就重新计算"）
@@ -332,7 +419,7 @@ def page_overview():
         progress = st.progress(0, text="正在扫描...")
         kronos_bar = st.empty() if source == "kronos" else None
         _scan_all_stocks(progress, source=source, kronos_progress=kronos_bar,
-                          force_refresh_data=need_refresh)
+                          force_refresh_data=need_refresh, types=types)
         st.session_state["overview_pool_fp"] = pool_fp
         progress.empty()
         if kronos_bar:
@@ -354,7 +441,18 @@ def page_overview():
         if market_df.empty:
             continue
 
-        st.markdown(f"### {market_label}")
+        # 组头摘要：不展开也知道这组里有没有值得看的东西
+        total_n = len(market_df)
+        buy_n = int((market_df["推荐"] == "买入").sum())
+        sell_n = int((market_df["推荐"] == "卖出").sum())
+        summary = f"{total_n} 个 · 买入 {buy_n} · 卖出 {sell_n} · 观望 {total_n - buy_n - sell_n}"
+        if only_signal:
+            market_df = market_df[market_df["推荐"].isin(["买入", "卖出"])]
+            summary += f" · **已筛出 {len(market_df)} 个有信号**"
+        st.markdown(f"### {market_label}（{summary}）")
+        if market_df.empty:
+            st.caption("这一组没有触发信号的标的（去掉上方「只看有信号的」可看全部）。")
+            continue
 
         # 表头：盘中显示"当前价"，收盘后显示"收盘价"（板块跟随 A 股时段）
         is_trading = hk_trading if market_key == "港股" else a_trading
@@ -366,6 +464,14 @@ def page_overview():
         prev_label = f"昨收({prev_date[5:]})" if prev_date else "昨收"
 
         sig_label = f"{SIGNAL_SOURCE_LABELS[source]}信号"
+
+        # 行数多的组改用紧凑表格：逐行版每行 9 个 columns + 1 个按钮，95 行 ≈ 950 个
+        # widget，光渲染就卡（#28 评论）。≤20 行仍走逐行版，体感不变。
+        if len(market_df) > COMPACT_ROWS:
+            _render_overview_compact(market_df, price_label, prev_label, sig_label,
+                                     market_key)
+            continue
+
         col_ratios = [2.5, 1.2, 1.2, 1, 1, 1.4, 1, 1, 0.8]
         header_cols = st.columns(col_ratios)
         for col, title in zip(header_cols, ["股票", price_label, prev_label, "涨跌幅", "市盈率", sig_label, "推荐", "仓位", ""]):
@@ -1928,10 +2034,47 @@ def page_custom_strategy():
         st.info("回测期间无交易发生（信号源未触发建仓，或策略未满足进出仓条件）。")
 
 
+# 板块多到这个数以上就不画全矩阵了，改给聚类分组 + 子矩阵（#29 评论：95×95 读不出东西）
+HEATMAP_MAX = 25
+# 格子多到这个数以上就不写格内数字，只留颜色 + hover（挤成一团的数字比没有更糟）
+CELL_TEXT_MAX = 15
+
+
+def _corr_heatmap(mat, window, method_label, mode_label, mode, title_note=""):
+    """画一张相关性热力图（矩阵已按传入顺序排好）"""
+    from analysis.correlation import cluster_order
+
+    order = cluster_order(mat)
+    m = mat.loc[order, order]
+    n = len(order)
+    heat = dict(
+        z=m.values, x=list(m.columns), y=list(m.index),
+        zmin=-1, zmax=1,
+        colorscale=[[0.0, "#2e8b57"], [0.5, "#f5f5f5"], [1.0, "#c0392b"]],  # 负绿 中灰 正红
+        colorbar=dict(title="相关系数"),
+        hovertemplate="%{y} × %{x}<br>相关系数=%{z:.3f}<extra></extra>",
+    )
+    if n <= CELL_TEXT_MAX:
+        heat.update(text=m.round(2).values, texttemplate="%{text}",
+                    textfont={"size": 10})
+    fig = go.Figure(data=go.Heatmap(**heat))
+    fig.update_layout(height=max(400, 34 * n + 160), xaxis=dict(side="bottom"),
+                      yaxis=dict(autorange="reversed"), margin=dict(l=10, r=10, t=30, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"{title_note}红=正相关（同涨跌），绿=负相关（反向）。窗口 {window} 交易日，"
+               f"{method_label}，{mode_label}。"
+               + ("板块 ≥3 已按层次聚类重排，抱团板块相邻。" if n >= 3 else "")
+               + (f"　【{n} 个板块，格内数字已省略（只保留颜色），把鼠标停在格子上看具体数值】"
+                  if n > CELL_TEXT_MAX else "")
+               + ("　【原始相关被大盘主导，成长赛道普遍偏红；想看真实轮动/对冲请切「剔除大盘」】"
+                  if mode == "raw" else ""))
+
+
 def _render_sector_correlation(sel_codes, name_by_code):
-    """板块相关性视图：热力图 + 单板块联动榜 + 负相关对冲榜（#29，#37 合页后只收板块列表）"""
+    """板块相关性视图：热力图 + 单板块联动榜 + 相关对榜（#29，#37 合页后只收板块列表）"""
     from analysis.correlation import (
-        corr_matrix, linkage_ranking, hedge_pairs, cluster_order, VALID_WINDOWS,
+        VALID_WINDOWS, cluster_groups, cluster_order, corr_matrix, linkage_ranking,
+        pairs_from_matrix,
     )
 
     st.caption("对一组板块的日收益率两两算相关系数：谁同涨同跌（正相关抱团）、谁反向（负相关可对冲/轮动）。")
@@ -1965,26 +2108,56 @@ def _render_sector_correlation(sel_codes, name_by_code):
         st.warning("参与板块的收益率数据不足或对齐后无重叠交易日，换更短窗口或减少停牌/新板块再试。")
         return
 
-    tab_heat, tab_link, tab_hedge = st.tabs(["相关性热力图", "单板块联动榜", "负相关对冲榜"])
+    tab_heat, tab_link, tab_hedge = st.tabs(["相关性热力图", "单板块联动榜", "相关对排行"])
 
     with tab_heat:
-        order = cluster_order(mat)
-        m = mat.loc[order, order]
-        fig = go.Figure(data=go.Heatmap(
-            z=m.values, x=list(m.columns), y=list(m.index),
-            zmin=-1, zmax=1,
-            colorscale=[[0.0, "#2e8b57"], [0.5, "#f5f5f5"], [1.0, "#c0392b"]],  # 负绿 中灰 正红
-            colorbar=dict(title="相关系数"),
-            text=m.round(2).values, texttemplate="%{text}", textfont={"size": 10},
-            hovertemplate="%{y} × %{x}<br>相关系数=%{z:.3f}<extra></extra>",
-        ))
-        n = len(order)
-        fig.update_layout(height=max(400, 34 * n + 160), xaxis=dict(side="bottom"),
-                          yaxis=dict(autorange="reversed"), margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"红=正相关（同涨跌），绿=负相关（反向）。窗口 {window} 交易日，{method_label}，{mode_label}。"
-                   + ("板块 ≥3 已按层次聚类重排，抱团板块相邻。" if n >= 3 else "")
-                   + ("　【原始相关被大盘主导，成长赛道普遍偏红；想看真实轮动/对冲请切「剔除大盘」】" if mode == "raw" else ""))
+        n_all = len(mat.columns)
+        if n_all <= HEATMAP_MAX:
+            _corr_heatmap(mat, window, method_label, mode_label, mode)
+        else:
+            # 板块太多：全矩阵画出来是 3390px 高、9025 个格子，读不出任何东西。
+            # 改成先给「谁和谁抱团」的分组结论，再让用户挑一组画子矩阵。
+            st.info(f"当前 {n_all} 个板块（> {HEATMAP_MAX}），全矩阵有 {n_all * n_all} 个格子、"
+                    f"缩到屏幕宽度后字会糊成一片，所以先给**抱团分组**；要看矩阵请在下面挑一组"
+                    f"或自己勾选（≤ {HEATMAP_MAX} 个）。")
+            groups = cluster_groups(mat)
+            st.dataframe(
+                pd.DataFrame([{
+                    "组": f"第 {i} 组", "成员数": len(g["members"]),
+                    "组内平均相关": g["avg_corr"],
+                    "成员": "、".join(g["members"]),
+                } for i, g in enumerate(groups, start=1)])
+                .style.format({"组内平均相关": "{:+.3f}"}, na_rep="—"),
+                hide_index=True, use_container_width=True,
+            )
+            st.caption("按层次聚类切组（距离 = 1 − 相关系数，与热力图的重排是同一套聚类）。"
+                       "「组内平均相关」越高＝抱得越紧；单成员组没有组内相关，显示「—」"
+                       "（不是 0，0 会被读成不相关）。")
+
+            labels = [f"第 {i} 组（{len(g['members'])} 个）"
+                      for i, g in enumerate(groups, start=1)]
+            c_group, c_pick = st.columns([1, 3])
+            with c_group:
+                # 默认最大的组：分组视图之后最想看的就是「最大那团内部长什么样」
+                biggest = max(range(len(groups)), key=lambda i: len(groups[i]["members"]))
+                chosen = st.selectbox("画哪一组的矩阵", labels, index=biggest,
+                                      key="corr_group_pick")
+            members = groups[labels.index(chosen)]["members"]
+            with c_pick:
+                custom = st.multiselect(
+                    f"或自己勾选板块（≤ {HEATMAP_MAX} 个，留空则用左边选的组）",
+                    list(mat.columns), default=[], key="corr_custom_pick")
+            subset = custom or members
+            if len(subset) > HEATMAP_MAX:
+                st.warning(f"勾了 {len(subset)} 个，超过 {HEATMAP_MAX} 个就又读不清了——"
+                           f"只画前 {HEATMAP_MAX} 个。")
+                subset = subset[:HEATMAP_MAX]
+            if len(subset) < 2:
+                st.caption("这一组只有 1 个板块，画不了矩阵（相关性至少要 2 个）。"
+                           "换一组，或在右边自己勾几个。")
+            else:
+                _corr_heatmap(mat.loc[subset, subset], window, method_label, mode_label,
+                              mode, title_note=f"（{len(subset)}/{n_all} 个板块）")
 
     with tab_link:
         target_label = st.selectbox("选择板块", sel_labels, key="corr_link_target")
@@ -2007,13 +2180,29 @@ def _render_sector_correlation(sel_codes, name_by_code):
                 st.caption("无数据")
 
     with tab_hedge:
-        st.markdown("**全局相关系数最低的板块对（越负越可能对冲/轮动）**")
-        pairs = hedge_pairs(sel_codes, window=window, top_n=15, method=method, mode=mode)
-        if pairs:
-            st.dataframe(pd.DataFrame(pairs, columns=["板块 A", "板块 B", "相关系数"])
-                         .style.format({"相关系数": "{:.3f}"}), hide_index=True, use_container_width=True)
-        else:
-            st.caption("无数据")
+        # 两张表都吃上面已经算好的 mat：hedge_pairs() 会自己再算一遍 corr_matrix，
+        # 95 个板块时等于把取数与计算白做一遍
+        col_neg, col_pos = st.columns(2)
+        with col_neg:
+            st.markdown("**相关系数最低的板块对**（越负越可能对冲/轮动）")
+            neg = pairs_from_matrix(mat, top_n=15, positive=False)
+            if neg:
+                st.dataframe(pd.DataFrame(neg, columns=["板块 A", "板块 B", "相关系数"])
+                             .style.format({"相关系数": "{:.3f}"}),
+                             hide_index=True, use_container_width=True)
+            else:
+                st.caption("无数据")
+        with col_pos:
+            st.markdown("**相关系数最高的板块对**（抱团最紧，同涨同跌）")
+            pos = pairs_from_matrix(mat, top_n=15, positive=True)
+            if pos:
+                st.dataframe(pd.DataFrame(pos, columns=["板块 A", "板块 B", "相关系数"])
+                             .style.format({"相关系数": "{:.3f}"}),
+                             hide_index=True, use_container_width=True)
+            else:
+                st.caption("无数据")
+        st.caption(f"在所选 {len(mat.columns)} 个板块的两两组合里取极值（各 15 对）。"
+                   "板块多到画不了矩阵时，这两张表和「抱团分组」就是主要读法——它们与板块数无关。")
 
 
 # ========== 板块轮动视图（issue #34） ==========
