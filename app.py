@@ -34,10 +34,17 @@ def _start_background_jobs():
     资金流快照（#34）：资金流没有逐日历史接口，只能自己攒。15:40 跑（A 股 15:00 收盘，
     留 40 分钟等 THS 数据稳定），工作日触发、非交易日由 snapshot_fund_flow 内部的交易日
     闸门挡掉。本仓库目前没有任何功能读这张表——今天不开始积累，将来想用就得再等几个月。
+
+    成分股夜间刷新（#35）：东财成分股接口是**窗口性限流**（实测同一分钟内 22 个
+    (分片,协议) 组合只有 2 个通，两分钟后全挂，再过 40 秒又活）。白天用户点「选股」时
+    只肯等一轮，所以缓存得靠夜里攒——每晚 03:20 跑一遍池内板块，函数内部每页最多重试
+    JOB_ATTEMPTS 轮，一晚下来大概率能撞上可用窗口。每天跑而不是按 7 天 TTL 跑：白跑一晚
+    只是几十个 HTTP 请求，而缓存空着会让第二天的选股入口全都要现场赌限流。
     """
     from apscheduler.schedulers.background import BackgroundScheduler
     from data.news import purge_expired_news
     from data.fund_flow import snapshot_fund_flow
+    from data.sector_cons import refresh_pool_constituents
 
     sched = BackgroundScheduler()
     sched.add_job(purge_expired_news, "cron", hour=3, minute=0,
@@ -45,6 +52,8 @@ def _start_background_jobs():
     sched.add_job(snapshot_fund_flow, "cron", day_of_week="mon-fri",
                   hour=15, minute=40,
                   id="snapshot_sector_fund_flow", replace_existing=True)
+    sched.add_job(refresh_pool_constituents, "cron", hour=3, minute=20,
+                  id="refresh_sector_constituents", replace_existing=True)
     sched.start()
     return sched
 
@@ -2162,6 +2171,7 @@ def _render_sector_rotation(sel_codes, name_by_code):
                                   xaxis_title="z 分项（叠加=热度分）",
                                   legend=dict(orientation="h", yanchor="bottom", y=1.01))
                 st.plotly_chart(fig, use_container_width=True)
+            _render_sector_pick_panel(hot)
 
     # ---------- 轮动提示 ----------
     with tab_sig:
@@ -2203,6 +2213,149 @@ def _render_sector_rotation(sel_codes, name_by_code):
                     }, na_rep="—"),
                     hide_index=True, use_container_width=True,
                 )
+
+
+# ========== 板块内选股（issue #35：挂在热度分排名下方） ==========
+
+_PICK_ROWS_EXPANDER_LIMIT = 20      # 板块多于这么多个就把入口列表收进 expander
+
+
+def _render_sector_pick_panel(hot):
+    """热度分排名下方的选股入口：一行一个板块 + 「选股」按钮（#35）
+
+    按钮状态只看**本地缓存**（`cached_status` 不打接口）——一页十几个板块，不能为了
+    画按钮去打十几次限流接口。只有「未匹配到东财板块」才禁用（那是确定性的不支持，
+    等限流窗口也没用，得去补 alias）；没有缓存不等于取不到，允许点下去现场赌一枪。
+    """
+    from config.settings import SECTOR_PICK_TOP_N, get_sector_info
+    from data.sector_cons import (
+        CONS_TTL_DAYS, STATE_CACHED, STATE_UNMATCHED, cached_status,
+    )
+
+    st.markdown("---")
+    st.markdown("#### 板块内选股（从热门板块下钻到个股）")
+    st.caption(
+        "两级漏斗：**粗筛**用东财成分股自带的涨跌幅取前 N 只（免费），**细算**只对这 N 只算"
+        "技术/缠论信号 + 基本面 flags + 相对板块超额收益。**不含 Kronos**（单只 CPU 上约 40 秒，"
+        "20 只不可接受）。成分股是全仓库唯一用东方财富的地方，行情/资金流仍走同花顺。"
+        f"成分股本地缓存 {CONS_TTL_DAYS} 天，每晚 03:20 有 job 重试刷新（接口是窗口性限流）。"
+    )
+    top_n = st.number_input("细算只数 N", min_value=1, max_value=100,
+                            value=int(SECTOR_PICK_TOP_N), step=5, key="pick_top_n",
+                            help="改大更全但更慢：每只要取日K + 算信号 + 取财报")
+
+    rows = [(name, r["code"], r.get("热度分")) for name, r in hot.iterrows()]
+    box = (st.expander(f"选择板块（{len(rows)} 个，按热度分降序）", expanded=False)
+           if len(rows) > _PICK_ROWS_EXPANDER_LIMIT else st.container())
+    with box:
+        for name, code, score in rows:
+            info = get_sector_info(code)
+            kind = info[1] if info else "industry"
+            status = cached_status(name, kind)
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 5])
+            c1.markdown(f"**{name}**")
+            c2.markdown("—" if score is None or pd.isna(score) else f"{score:+.2f}")
+            if c3.button("选股", key=f"pick_btn_{code}",
+                         disabled=status["state"] == STATE_UNMATCHED,
+                         help=status["reason"] or None):
+                st.session_state["pick_target"] = (code, name, kind)
+            if status["state"] == STATE_CACHED:
+                c4.caption(f"成分股 {status['count']} 只 · 缓存 {status['fetched_at']}"
+                           + ("（**已过期**，取数失败会继续用它）" if status["stale"] else ""))
+            else:
+                c4.caption(status["reason"])
+
+    target = st.session_state.get("pick_target")
+    if not target:
+        st.caption("点上面某个板块的「选股」按钮，这里会展开该板块的候选股排名。")
+        return
+    _render_sector_pick_result(target, int(top_n))
+
+
+def _render_sector_pick_result(target, top_n):
+    """跑 pick() 并展示候选股表（结果缓存在 session，否则每次交互都要重算一遍 #35）"""
+    from analysis.sector_pick import PICK_SIGNALS, PICK_WINDOW, pick
+
+    code, name, kind = target
+    st.markdown(f"##### 「{name}」候选股")
+    c1, c2 = st.columns([1, 4])
+    retry = c1.button("重试取数", key="pick_retry",
+                      help="只强制重取成分股（日K缓存照旧复用）。东财限流是窗口性的，"
+                           "多试一轮常能撞上可用窗口")
+    cache_key = (code, top_n)
+    cached = st.session_state.get("pick_result")
+    if retry or not cached or cached.get("key") != cache_key:
+        bar = st.progress(0.0, text="取成分股…")
+
+        def _cb(i, total, msg):
+            bar.progress(i / max(1, total), text=f"细算 {i}/{total}：{msg}")
+
+        res = pick(code, kind, top_n=top_n, sector_name=name,
+                   force_cons=bool(retry), progress_cb=_cb)
+        bar.empty()
+        st.session_state["pick_result"] = {"key": cache_key, "res": res}
+    res = st.session_state["pick_result"]["res"]
+
+    if not res["available"]:
+        st.warning((res["warnings"] or ["成分股不可用"])[0])
+        return
+
+    st.caption(f"东财板块 {res['em_name']}({res['em_code']})，名称匹配方式：{res['match_level']}。"
+               f"**已从 {res['total_constituents']} 只成分股中按涨跌幅粗筛出 "
+               f"{res['top_n']} 只、实际算成 {res['computed']} 只**"
+               f"（改上方 N 可扩大范围；不是「全都算过了」）。"
+               f"成分股快照时间 {res['fetched_at']}"
+               + ("（**过期缓存**）" if res["stale"] else "")
+               + f"，粗筛用的涨跌幅就是那一刻的值。")
+    if res["stale"]:
+        st.warning(f"成分股是过期缓存（{res['fetched_at']}）：成分调整是月度级，通常无妨，"
+                   f"但「涨跌幅」这一列不是今天的，粗筛口径也随之是那天的。")
+
+    if not res["candidates"]:
+        st.warning("候选集是空的（粗筛出来的股票日K全都取不到）。" +
+                   ("原因：" + "；".join(res["warnings"]) if res["warnings"] else ""))
+        return
+
+    w = res["weights"]
+    st.markdown(f"**排序分 = {w['technical']}·z(技术信号) + {w['excess']}·z({PICK_WINDOW}日相对板块超额)"
+                f" + {w['fundamental']}·基本面加减分**")
+    st.caption(f"两个 z 分项在**候选集内**算（不是全市场）；基本面加减分是 flags 里每个正向"
+               f"标签 +0.5、负向 −0.5（映射表写死在 analysis/sector_pick.py）。"
+               f"细算的信号源：{'、'.join(PICK_SIGNALS)}——**不含 Kronos**。"
+               f"缠论信号照算照显示但不进排序分（issue 定的公式只有三项）。"
+               f"本页不产生交易信号、不进 fusion、不影响回测与仓位。")
+
+    ret_col, ex_col = f"{PICK_WINDOW}日收益%", f"{PICK_WINDOW}日相对板块超额%"
+    table = pd.DataFrame([{
+        "代码": c["code"], "名称": c["name"], "现价": c["price"],
+        "涨跌幅%(快照)": c["change_pct"],
+        "技术信号": c["technical"], "缠论信号": c["chanlun"],
+        ret_col: c["stock_return"], ex_col: c["excess"],
+        "基本面加减分": c["fund_score"],
+        "z_技术": c["z_technical"], "z_超额": c["z_excess"], "排序分": c["score"],
+        "基本面标签": "、".join(c["fund_flags"]) if c["fund_flags"] else
+                    ("（无标签）" if c["fund_flags"] == [] else "—"),
+        "备注": c["note"],
+    } for c in res["candidates"]])
+    signed = ["涨跌幅%(快照)", "技术信号", "缠论信号", ret_col, ex_col,
+              "基本面加减分", "z_技术", "z_超额", "排序分"]
+    st.dataframe(
+        table.style.format({
+            "现价": "{:.2f}", "涨跌幅%(快照)": "{:+.2f}",
+            "技术信号": "{:+.3f}", "缠论信号": "{:+.3f}",
+            ret_col: "{:+.2f}", ex_col: "{:+.2f}", "基本面加减分": "{:+.1f}",
+            "z_技术": "{:+.2f}", "z_超额": "{:+.2f}", "排序分": "{:+.3f}",
+        }, na_rep="—").map(_signed_color, subset=signed),
+        hide_index=True, use_container_width=True,
+    )
+    st.caption(f"板块指数同期收益：{res['sector_return']:+.2f}%" if res["sector_return"] is not None
+               else "板块指数日K取不到，超额收益列缺失（该项按 0 计入排序分）。")
+    if res["warnings"]:
+        st.caption("⚠️ " + "；".join(res["warnings"]))
+    notes = table[table["备注"] != ""]
+    if not notes.empty:
+        st.caption("以下标的有缺项（该项按 0 计入排序分，**不是**算出来等于 0）：" +
+                   "；".join(f"{r['名称']}——{r['备注']}" for _, r in notes.iterrows()))
 
 
 # ========== 板块分析页（issue #37：合并相关性与轮动） ==========
