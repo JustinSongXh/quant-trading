@@ -2300,7 +2300,13 @@ def _render_sector_pick_result(target, top_n):
         st.warning((res["warnings"] or ["成分股不可用"])[0])
         return
 
-    st.caption(f"东财板块 {res['em_name']}({res['em_code']})，名称匹配方式：{res['match_level']}。"
+    # 跨 kind 命中要点明（#38）：池内是行业板块、成分股却来自东财的概念板块，
+    # 不说一句会像配错了
+    kind_note = ("（东财把它归在"
+                 f"{'概念' if res.get('em_kind') == 'concept' else '行业'}板块，"
+                 "两家分类口径不一致）" if res.get("cross_kind") else "")
+    st.caption(f"东财板块 {res['em_name']}({res['em_code']}){kind_note}，"
+               f"名称匹配方式：{res['match_level']}。"
                f"**已从 {res['total_constituents']} 只成分股中按涨跌幅粗筛出 "
                f"{res['top_n']} 只、实际算成 {res['computed']} 只**"
                f"（改上方 N 可扩大范围；不是「全都算过了」）。"
