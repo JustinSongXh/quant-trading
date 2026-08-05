@@ -138,7 +138,7 @@ def _fetch_sector_snapshot(name: str, kind: str) -> dict | None:
 
 def _sector_quotes(items: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
     """板块项 → 与腾讯同构的 quote dict。名称/类型从股票池配置取。"""
-    from config.settings import get_sector_info
+    from config.pool import get_sector_info
     from datetime import date
 
     if not items:

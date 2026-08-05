@@ -255,7 +255,7 @@ def fetch_daily_kline(symbol: str, days: int = DEFAULT_LOOKBACK_DAYS, stock_type
 
     sector_info = None
     if is_sector(symbol, stock_type):
-        from config.settings import get_sector_info
+        from config.pool import get_sector_info
         sector_info = get_sector_info(symbol)
         if not sector_info:
             raise ValueError(f"板块 {symbol} 缺少名称/类型配置，无法取数")

@@ -492,12 +492,12 @@ def test_prompt_module_has_no_provider_specific_text():
 # ---------- 不接入信号系统 ----------
 def test_not_wired_into_signal_system():
     """对话是 L2 解读层：不产生 signal、不进 fusion、不影响回测与仓位"""
-    from strategy.fusion import SOURCE_COLUMNS
+    from strategy.decision import SOURCE_COLUMNS
     from strategy.signals import SIGNAL_SOURCES
 
     for name in list(SIGNAL_SOURCES) + list(SOURCE_COLUMNS):
         assert "chat" not in str(name) and "llm" not in str(name).lower(), name
-    for rel in ("strategy/signals.py", "strategy/fusion.py", "backtest/engine.py"):
+    for rel in ("strategy/signals.py", "strategy/decision.py", "backtest/engine.py"):
         src = (REPO / rel).read_text(encoding="utf-8")
         assert "analysis.chat" not in src and "chat.tools" not in src, rel
     # config/settings.py 里只该有一行 DEFAULT_CHAT_PROVIDER（注释里会提到 providers 目录），

@@ -5,18 +5,18 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
-from config.settings import (
+from config.pool import (
     load_stock_pool, get_stock_name, get_stock_type, add_stock, remove_stock,
     add_stocks, remove_stocks,
-    DEFAULT_SIGNAL_SOURCE, SIGNAL_THRESHOLD, SIGNAL_LOOKBACK,
 )
+from config.settings import DEFAULT_SIGNAL_SOURCE, SIGNAL_THRESHOLD, SIGNAL_LOOKBACK
 from data.fetcher import is_hk_stock
 from data.kline import get_kline
 from data.stock_list import search_stocks
 from data.realtime import get_realtime_quotes
 from data.cache import is_during_trading
 from strategy.signals import build_signals
-from strategy.fusion import fuse_signals, SOURCE_COLUMNS
+from strategy.decision import decide, SOURCE_COLUMNS
 from backtest.engine import run_backtest
 from backtest.metrics import calc_metrics
 from strategy.trade_strategy import list_trade_strategies, get_trade_strategy
@@ -305,7 +305,7 @@ def _build_overview_rows(source, buy_threshold=SIGNAL_THRESHOLD, sell_threshold=
             rows.append({**meta, "信号值": "-", "推荐": "数据异常", "仓位建议": ""})
             continue
 
-        fusion_result = fuse_signals(signal_df, source=source,
+        fusion_result = decide(signal_df, source=source,
                                       buy_threshold=buy_threshold,
                                       sell_threshold=sell_threshold)
         last = signal_df.iloc[-1]
@@ -973,7 +973,7 @@ def page_detail():
             signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,
                                             enabled_signals=[source],
                                             progress_cb=_detail_progress if kronos_progress else None)
-            fusion_full = fuse_signals(signal_df_full, source=source,
+            fusion_full = decide(signal_df_full, source=source,
                                         buy_threshold=buy_th, sell_threshold=sell_th)
 
             # 回测 df：严格裁到 time_range_days 范围
@@ -1913,7 +1913,7 @@ def page_custom_strategy():
             signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,
                                             enabled_signals=[source],
                                             progress_cb=_cs_progress if kronos_progress else None)
-            fusion_full = fuse_signals(signal_df_full, source=source)
+            fusion_full = decide(signal_df_full, source=source)
             cutoff = signal_df_full.index.max() - pd.Timedelta(days=time_range_days)
             signal_df_bt = signal_df_full.loc[signal_df_full.index >= cutoff]
             fusion_bt = fusion_full.loc[fusion_full.index >= cutoff]
@@ -2395,7 +2395,8 @@ def _render_sector_pick_panel(hot):
     画按钮去打十几次限流接口。只有「未匹配到东财板块」才禁用（那是确定性的不支持，
     等限流窗口也没用，得去补 alias）；没有缓存不等于取不到，允许点下去现场赌一枪。
     """
-    from config.settings import SECTOR_PICK_TOP_N, get_sector_info
+    from config.pool import get_sector_info
+    from config.settings import SECTOR_PICK_TOP_N
     from data.sector_cons import (
         CONS_TTL_DAYS, STATE_CACHED, STATE_UNMATCHED, cached_status,
     )

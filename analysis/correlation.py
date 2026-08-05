@@ -14,7 +14,7 @@
 
 import pandas as pd
 
-from config.settings import get_stock_name
+from config.pool import get_stock_name
 from data.kline import get_kline
 
 VALID_WINDOWS = (20, 60, 120)

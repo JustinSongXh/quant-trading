@@ -20,6 +20,7 @@ import tempfile
 
 import pandas as pd
 
+import config.pool as pool_cfg
 import config.settings as cfg
 
 APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
@@ -74,9 +75,9 @@ class _Env:
         # 一 import 就会**拿真实股票池跑一遍总览页**（实测 95 个板块逐个打 THS 快照）。
         # 需要 app.py 里的常量就用 _app_const() 从源码读。
         self.tmp = tempfile.mkdtemp(prefix="ov_test_")
-        self.saved_file = cfg._STOCKS_FILE
-        cfg._STOCKS_FILE = os.path.join(self.tmp, "stocks.json")
-        with open(cfg._STOCKS_FILE, "w", encoding="utf-8") as f:
+        self.saved_file = pool_cfg._STOCKS_FILE
+        pool_cfg._STOCKS_FILE = os.path.join(self.tmp, "stocks.json")
+        with open(pool_cfg._STOCKS_FILE, "w", encoding="utf-8") as f:
             json.dump(_pool(self.n_sectors, self.n_stocks), f, ensure_ascii=False)
 
         import data.cache as cache
@@ -109,7 +110,7 @@ class _Env:
         import data.cache as cache
         import data.fetcher as fetcher
         import data.realtime as realtime
-        cfg._STOCKS_FILE = self.saved_file
+        pool_cfg._STOCKS_FILE = self.saved_file
         cache.CACHE_DB_PATH = self.saved_db
         realtime.get_realtime_quotes = self.saved["quotes"]
         fetcher.fetch_daily_kline = self.saved["kline"]

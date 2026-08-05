@@ -1,11 +1,12 @@
 """入口：运行回测流程"""
 
-from config.settings import STOCK_POOL, DEFAULT_SIGNAL_SOURCE
+from config.pool import load_stock_pool
+from config.settings import DEFAULT_SIGNAL_SOURCE
 from data.fetcher import fetch_daily_kline
 from data.mock import fetch_mock_kline
 from data.cache import save_kline, load_kline
 from strategy.signals import build_signals
-from strategy.fusion import fuse_signals
+from strategy.decision import decide
 from backtest.engine import run_backtest
 from backtest.metrics import calc_metrics
 from utils.logger import get_logger
@@ -14,7 +15,9 @@ logger = get_logger()
 
 
 def run(symbols: list[str] | None = None):
-    symbols = symbols or STOCK_POOL
+    # 现取而不是用 import 时算好的常量（#41 删掉了 settings.STOCK_POOL）：
+    # 池子改了同进程也该看得到
+    symbols = symbols or [s["code"] for s in load_stock_pool()]
     results = []
 
     for symbol in symbols:
@@ -38,7 +41,7 @@ def run(symbols: list[str] | None = None):
                                    enabled_signals=[source])
 
         # 3. 决策
-        fusion_result = fuse_signals(signal_df, source=source)
+        fusion_result = decide(signal_df, source=source)
 
         # 4. 回测
         result = run_backtest(symbol, signal_df, fusion_result)

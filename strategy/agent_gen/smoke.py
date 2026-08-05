@@ -1,6 +1,6 @@
 """闸门 3：子进程冒烟回测（#30）
 
-把候选策略放进真实链路跑一遍——`build_signals` → `fuse_signals` → `run_backtest`，
+把候选策略放进真实链路跑一遍——`build_signals` → `decide` → `run_backtest`，
 只断言「跑得起来」而非「赚不赚钱」：不抛异常、净值曲线非空、final_value 有限。
 
 为什么必须开子进程：AST 静态校验挡不住死循环和死锁。`while True: pass` 完全合法，
@@ -181,7 +181,7 @@ def _load_kline(symbol: str, stock_type: str, synthetic: bool):
 
 def _run_cases(path: str, key: str, synthetic: bool) -> list[dict]:
     from backtest.engine import run_backtest
-    from strategy.fusion import fuse_signals
+    from strategy.decision import decide
     from strategy.signals import build_signals
 
     cls = _load_strategy_class(path, key)
@@ -194,7 +194,7 @@ def _run_cases(path: str, key: str, synthetic: bool) -> list[dict]:
             raise RuntimeError(f"{symbol} 行情为空，无法冒烟（数据源不可用）")
 
         signal_df = build_signals(kline, symbol=symbol, enabled_signals=["technical"])
-        fusion = fuse_signals(signal_df, source="technical")
+        fusion = decide(signal_df, source="technical")
 
         # 同一个实例连跑两只：顺带验证 reset() 真的清干净了，
         # 否则第一只的持仓状态会串到第二只（引擎每轮只调 reset）

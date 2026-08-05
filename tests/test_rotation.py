@@ -270,7 +270,7 @@ def test_hotness_empty_pool():
 # ---------- 不接入信号系统 ----------
 def test_not_wired_into_signal_system():
     """轮动是确定性参考层：不产生 signal、不进 fusion、不影响回测与仓位"""
-    from strategy.fusion import SOURCE_COLUMNS
+    from strategy.decision import SOURCE_COLUMNS
     from strategy.signals import SIGNAL_SOURCES
 
     for name in list(SIGNAL_SOURCES) + list(SOURCE_COLUMNS):

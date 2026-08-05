@@ -448,13 +448,13 @@ def test_progress_cb_reports_every_candidate():
 
 def test_not_wired_into_signal_system():
     """选股是确定性参考层：不产生 signal、不进 fusion、不影响回测与仓位"""
-    from strategy.fusion import SOURCE_COLUMNS
+    from strategy.decision import SOURCE_COLUMNS
     from strategy.signals import SIGNAL_SOURCES
 
     for name in list(SIGNAL_SOURCES) + list(SOURCE_COLUMNS):
         assert "pick" not in str(name) and "sector_cons" not in str(name), name
     root = os.path.join(os.path.dirname(__file__), "..")
-    for rel in ("strategy/signals.py", "strategy/fusion.py", "backtest/engine.py"):
+    for rel in ("strategy/signals.py", "strategy/decision.py", "backtest/engine.py"):
         src = open(os.path.join(root, rel), encoding="utf-8").read()
         assert "sector_pick" not in src and "sector_cons" not in src, rel
 

@@ -546,7 +546,7 @@ def refresh_pool_constituents() -> dict:
     东财限流是窗口性的，一晚多试几次大概率撞上可用窗口；白天用户点「选股」时就直接命中
     缓存。返回 `{板块名: 成分股数 or None}` 便于日志核对。
     """
-    from config.settings import load_stock_pool
+    from config.pool import load_stock_pool
 
     out = {}
     for s in load_stock_pool():

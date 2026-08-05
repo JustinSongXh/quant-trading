@@ -12,8 +12,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import config.settings as cfg
-from config.settings import (
+import config.pool as pool
+from config.pool import (
     add_stock, add_stocks, get_sector_info, load_stock_pool, remove_stock,
     remove_stocks,
 )
@@ -24,14 +24,14 @@ APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
 def _temp_pool(fn):
     """把股票池文件指到临时目录跑 fn，跑完还原"""
     tmp = tempfile.mkdtemp(prefix="pool_test_")
-    original = cfg._STOCKS_FILE
-    cfg._STOCKS_FILE = os.path.join(tmp, "stocks.json")
-    with open(cfg._STOCKS_FILE, "w", encoding="utf-8") as f:
+    original = pool._STOCKS_FILE
+    pool._STOCKS_FILE = os.path.join(tmp, "stocks.json")
+    with open(pool._STOCKS_FILE, "w", encoding="utf-8") as f:
         json.dump([{"code": "600519", "name": "贵州茅台", "market": "A"}], f)
     try:
         return fn()
     finally:
-        cfg._STOCKS_FILE = original
+        pool._STOCKS_FILE = original
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -85,12 +85,13 @@ def test_add_stocks_keeps_kind_and_type_pairs():
 def test_add_stocks_writes_file_once():
     def body():
         calls = []
-        original_save = cfg.save_stock_pool
-        cfg.save_stock_pool = lambda pool: (calls.append(len(pool)), original_save(pool))[1]
+        original_save = pool.save_stock_pool
+        pool.save_stock_pool = lambda stocks: (calls.append(len(stocks)),
+                                               original_save(stocks))[1]
         try:
             assert add_stocks(_sectors(90)) == 90
         finally:
-            cfg.save_stock_pool = original_save
+            pool.save_stock_pool = original_save
         assert len(calls) == 1, f"90 个板块该只写一次 json，实际写了 {len(calls)} 次"
         assert calls[0] == 91
     _temp_pool(body)

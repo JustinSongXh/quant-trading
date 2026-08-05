@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from data.fetcher import fetch_daily_kline
 from strategy.signals import build_signals
-from strategy.fusion import fuse_signals
+from strategy.decision import decide
 from backtest.engine import run_backtest
 from backtest.metrics import calc_metrics
 
@@ -15,7 +15,7 @@ print(f"数据: {len(df)} 行, {df.index[0].date()} ~ {df.index[-1].date()}")
 
 # 只用 Kronos
 signal_df = build_signals(df, symbol="000001", enabled_signals=["kronos"])
-fusion_result = fuse_signals(signal_df, source="kronos")
+fusion_result = decide(signal_df, source="kronos")
 
 # 统计信号
 decisions = fusion_result["decision"]

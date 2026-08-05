@@ -121,12 +121,14 @@ docker exec quant-app pip install <pkg>     # 装在容器 fs 内，重启保留
 
 ## 8. 代码约定
 
-**分层与依赖方向**（目前是干净的，别破坏）：
+**分层与依赖方向**（#41 归位后的状态，别破坏）：
 
-- `data/` 只管取数与缓存，不做业务判断；
-- `analysis/` 是纯计算、无副作用（同一份输入得同一份输出，不写文件不发请求）；
-- `strategy/` → `backtest/` 单向依赖，不回头；
-- `config/settings.py` 只依赖 stdlib + dotenv，任何模块都能 import 它而不产生循环。
+- `data/` 是唯一实现「取数 + 缓存」的层：日K一律走 `data/kline.py::get_kline`（缓存新鲜度、cache key 前缀、失败回落过期缓存都在里面），JSON 文件缓存的 TTL 判定一律走 `data/file_cache.py`。**别在别处再写一遍这套流程**——#41 之前它有四份副本。
+- `analysis/` 不自己实现取数与缓存：要数据就调 `data/*`，自己只做计算（同一份输入得同一份输出）。
+- `strategy/` → `backtest/` 单向依赖，不回头。`strategy/decision.py::decide` 是「单源选择 + 阈值」，**不是多源融合**（旧名 `fusion.py` 曾误导过）。
+- `config/settings.py` 只放常量与 `.env` 读取，只依赖 stdlib + dotenv；股票池（自选清单）的读写在 `config/pool.py`——那是数据访问，不是配置。
+- 被别的模块引用的东西**不许是私有名**（`_foo`）。跨模块要用就改成公共名，或者说明它本该搬家。
+- 「丢一个文件进目录就注册一个插件」只有一套实现：`utils/plugin_registry.py`（两个 provider 注册表 + 自定义策略发现共用）。
 
 **取回来的数据要带出处和新鲜度**：缓存类返回值必须给 `fetched_at` 与 `stale`，并且**一路传到页面上显示**。「过期的数据远好过没有」的前提是用户知道它过期了——参考 `data/sector_cons.py::get_sector_constituents`。
 

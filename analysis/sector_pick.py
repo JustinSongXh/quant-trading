@@ -40,7 +40,7 @@ import pandas as pd
 import config.settings as cfg
 from analysis.fundamental import summarize
 from analysis.rotation import zscore
-from config.settings import get_sector_info
+from config.pool import get_sector_info
 from data.fundamentals import get_fundamentals
 from data.kline import get_kline
 from data.sector_cons import get_sector_constituents, unavailable_reason

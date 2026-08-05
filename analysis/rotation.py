@@ -22,7 +22,7 @@ import pandas as pd
 
 import config.settings as cfg
 from analysis.correlation import MARKET_INDEX, index_returns
-from config.settings import get_sector_info, get_stock_name
+from config.pool import get_sector_info, get_stock_name
 from data.fund_flow import net_by_sector
 from data.kline import get_kline
 
