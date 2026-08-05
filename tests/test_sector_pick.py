@@ -462,16 +462,26 @@ def test_not_wired_into_signal_system():
 # ========== 页面级：选股入口挂在热度分排名下方 ==========
 
 def test_pick_panel_is_wired_into_hotness_tab():
-    """源码自检：入口挂在热度分 tab 里、没有新增页面、夜间 job 已挂上（#35 第六、七节）"""
+    """源码自检：入口挂在热度分 tab 里、没有新增页面、夜间 job 已挂上（#35 第六、七节）
+
+    #42 拆分后各就各位：板块页在 ui/pages/sector.py、路由表在 app.py、定时任务在 ui/jobs.py。
+    """
     root = os.path.join(os.path.dirname(__file__), "..")
-    src = open(os.path.join(root, "app.py"), encoding="utf-8").read()
-    assert "_render_sector_pick_panel(hot)" in src, "选股入口应挂在热度分排名下方"
-    assert "def _render_sector_pick_panel" in src and "def _render_sector_pick_result" in src
+
+    def _src(rel):
+        return open(os.path.join(root, rel), encoding="utf-8").read()
+
+    sector_src = _src("ui/pages/sector.py")
+    assert "_render_sector_pick_panel(hot)" in sector_src, "选股入口应挂在热度分排名下方"
+    assert ("def _render_sector_pick_panel" in sector_src
+            and "def _render_sector_pick_result" in sector_src)
     # #35 不新增页面：选股挂在「板块分析」页里，不许出现「板块选股」这类新页
-    pages_line = next(ln for ln in src.splitlines() if ln.startswith("pages = ["))
-    assert '"板块分析"' in pages_line, pages_line
-    assert "选股" not in pages_line, f"#35 不该新增页面：{pages_line}"
-    assert "refresh_pool_constituents" in src, "成分股夜间刷新 job 应挂在 APScheduler 上"
+    app_src = _src("app.py")
+    routes = app_src.split("PAGES = {", 1)[1].split("}", 1)[0]
+    assert '"板块分析"' in routes, routes
+    assert "选股" not in routes, f"#35 不该新增页面：{routes}"
+    assert "refresh_pool_constituents" in _src("ui/jobs.py"), \
+        "成分股夜间刷新 job 应挂在 APScheduler 上"
 
 
 def test_page_renders_with_pick_panel():

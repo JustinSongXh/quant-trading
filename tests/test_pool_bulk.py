@@ -168,14 +168,21 @@ def test_pages_merged_and_legacy_session_mapped():
 
 
 def test_no_stale_page_names_left():
-    src = open(APP, encoding="utf-8").read()
+    # #42 起页面实现搬到 ui/pages/*.py，入口 app.py 只留路由——两处一起扫
+    import glob
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    srcs = [open(APP, encoding="utf-8").read()]
+    srcs += [open(p, encoding="utf-8").read()
+             for p in glob.glob(os.path.join(root, "ui", "**", "*.py"), recursive=True)]
+    blob = "\n".join(srcs)
     for gone in ('pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块相关性"',
                  "page_sector_correlation()", "page_sector_rotation()"):
-        assert gone not in src, f"合页后不该再有 {gone}"
-    assert "def page_sector_analysis" in src
-    assert "_render_sector_correlation" in src and "_render_sector_rotation" in src
+        assert gone not in blob, f"合页后不该再有 {gone}"
+    assert "def page_sector_analysis" in blob
+    assert "_render_sector_correlation" in blob and "_render_sector_rotation" in blob
     # 那个从未生效过的入口（池外板块会被静默丢弃）已删除
-    assert "从全量板块加入本次分析" not in src
+    assert "从全量板块加入本次分析" not in blob
     print("[OK] 旧的两个页面入口已清干净，池外板块那个坏入口已删")
 
 

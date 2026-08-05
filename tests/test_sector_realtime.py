@@ -177,7 +177,9 @@ def test_snapshot_failure_returns_none():
 
 # ---------- 3. 展示层：板块与个股同一口径 ----------
 def _meta(code, stype, df, rt_quote):
-    from app import _overview_meta_row
+    # #42 起总览页在 ui/pages/overview.py，import 它没有副作用（原先 `from app import ...`
+    # 会执行整个 Streamlit 脚本）
+    from ui.pages.overview import _overview_meta_row
     return _overview_meta_row(code, "消费电子", stype, "A", df, rt_quote)
 
 

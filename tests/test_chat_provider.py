@@ -104,11 +104,13 @@ def test_business_layer_never_imports_a_concrete_provider():
             assert "chat.providers" not in mod, \
                 f"{module.__name__} import 了具体 provider：{mod}"
 
-    app_src = (REPO / "app.py").read_text(encoding="utf-8")
-    for mod in _imports(app_src):
-        assert "chat.providers" not in mod, f"app.py import 了具体 provider：{mod}"
-    assert "analysis.chat.providers" not in app_src, \
-        "app.py 里出现了 analysis.chat.providers——业务层只能经 registry 拿实例"
+    # #42 起 chat 面板在 ui/pages/chat.py，入口 app.py 只做路由；两者都要守
+    for rel in ("app.py", "ui/pages/chat.py"):
+        src = (REPO / rel).read_text(encoding="utf-8")
+        for mod in _imports(src):
+            assert "chat.providers" not in mod, f"{rel} import 了具体 provider：{mod}"
+        assert "analysis.chat.providers" not in src, \
+            f"{rel} 里出现了 analysis.chat.providers——业务层只能经 registry 拿实例"
     print("[OK] 业务层不认识任何具体 provider")
 
 
@@ -510,10 +512,14 @@ def test_not_wired_into_signal_system():
 
 
 def test_page_count_and_routing():
+    """#42 起路由是 app.py 里的 PAGES 表，页面实现在 ui/pages/*.py"""
     src = (REPO / "app.py").read_text(encoding="utf-8")
-    assert '"AI 分析助手"' in src and "page_chat()" in src
-    assert 'pages = ["全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块分析",' in src
-    print("[OK] 侧边栏多了「AI 分析助手」一页，路由已接上")
+    assert '"AI 分析助手": page_chat' in src, "路由表里应有「AI 分析助手」→ page_chat"
+    assert "from ui.pages.chat import page_chat" in src
+    for name in ("全局信号总览", "单股票分析", "新闻列表", "股票池管理", "板块分析",
+                 "自定义策略", "AI 分析助手"):
+        assert f'"{name}"' in src, f"路由表缺少 {name}"
+    print("[OK] 侧边栏含「AI 分析助手」一页，PAGES 路由表已接上")
 
 
 if __name__ == "__main__":
