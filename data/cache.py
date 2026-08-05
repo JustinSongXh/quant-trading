@@ -143,9 +143,6 @@ def load_kline(symbol: str) -> pd.DataFrame | None:
 
 # ========== 新闻/公告/股吧缓存（issue #1） ==========
 
-NEWS_SOURCES = ("cninfo", "em_news", "em_guba")
-
-
 def _ensure_news_table():
     """确保 news_items 表存在"""
     _ensure_dir()

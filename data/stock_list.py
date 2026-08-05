@@ -156,11 +156,3 @@ def search_stocks(keyword: str, market: str | None = None) -> list[dict]:
             results.append(s)
 
     return results[:50]  # 最多返回 50 条
-
-
-def refresh_stock_lists():
-    """强制刷新全市场列表（供定时任务调用）"""
-    logger.info("Refreshing stock lists...")
-    a = get_a_stock_list(force_refresh=True)
-    hk = get_hk_stock_list(force_refresh=True)
-    logger.info(f"Refresh done: {len(a)} A-stocks, {len(hk)} HK-stocks")

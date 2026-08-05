@@ -272,7 +272,6 @@ _BUILTIN = {
     DefaultStrengthStrategy.key: DefaultStrengthStrategy,
     PlayDeadQuarterStrategy.key: PlayDeadQuarterStrategy,
 }
-DEFAULT_TRADE_STRATEGY = DefaultStrengthStrategy.key
 
 _CUSTOM_DIR = Path(__file__).parent / "custom"
 _registry_cache: dict | None = None
