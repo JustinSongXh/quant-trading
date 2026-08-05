@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc curl && rm 
 # 详见 tests/test_codegen_deps.py 与 #30 的评论。
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt fastapi uvicorn
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 8501 8000
+EXPOSE 8501

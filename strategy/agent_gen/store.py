@@ -16,7 +16,6 @@ provider 永远不碰文件系统，落盘只经本模块，路径全部由这�
 import ast
 import logging
 import re
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -264,15 +263,3 @@ def read_source(key: str) -> str:
     if not path.exists():
         raise StoreError(f"策略 {key} 不存在")
     return path.read_text(encoding="utf-8")
-
-
-def clear_rejected() -> int:
-    """清空 _rejected/，返回删除数量（前端人工清理入口）"""
-    if not REJECTED_DIR.is_dir():
-        return 0
-    n = 0
-    for path in REJECTED_DIR.glob("*.py"):
-        path.unlink(missing_ok=True)
-        n += 1
-    shutil.rmtree(REJECTED_DIR / "__pycache__", ignore_errors=True)
-    return n

@@ -7,7 +7,7 @@
 A 股 + 港股量化分析系统：本地取数 → 确定性计算（技术指标 / 缠论 / Kronos 预测 / 新闻情绪 / 基本面 / 板块相关性 / 板块轮动 / 板块内选股）→ Streamlit 页面 + 回测 + 盘后扫描推送。
 
 - **唯一在用的前端是 `app.py`**（Streamlit，7 页：全局信号总览 / 单股票分析 / 新闻列表 / 股票池管理 / 板块分析 / 自定义策略 / AI 分析助手）。
-- **`api/server.py`（FastAPI）已弃用**——原本给微信小程序用，小程序不做了。讨论页面行为、信号链路、一致性时**只参照 `app.py`**，不要把它当另一套实现去对比或建议拉齐。
+- 曾经有一个 FastAPI 后端 `api/server.py`（给微信小程序用），小程序不做了，代码已在 #40 删除。**不要再引入第二套前端/接口层**，也不要拿它的历史实现当对照——讨论页面行为、信号链路、一致性时只看 `app.py`。
 - 命令行入口：`main.py`（批量回测）、`scanner.py`（盘后扫描 + PushPlus 推送）、`purge_news.py`（清理窗口外新闻）。
 - app 进程内还有三个 APScheduler 定时任务（03:00 清新闻、03:20 刷板块成分股缓存、15:40 板块资金流快照），见 `app.py::_start_background_jobs`。
 
@@ -20,7 +20,7 @@ A 股 + 港股量化分析系统：本地取数 → 确定性计算（技术指�
 | 容器名 | `quant-app` |
 | 镜像 | `quant-trading-app`（根目录 `Dockerfile` 构建） |
 | Base | `python:3.12-slim` |
-| 端口 | 8501（Streamlit）；8000 是已弃用的 FastAPI，compose 还启着 |
+| 端口 | 8501（Streamlit），仅此一个 |
 | 工作目录 | `/app`，宿主 `./` 通过 volume 挂进来——**改代码即时生效，不用重建** |
 | 时区 | `Asia/Shanghai`（定时任务按本地时间触发） |
 | Compose | `docker-compose.yml`（**不入 git**，见第 7 节） |

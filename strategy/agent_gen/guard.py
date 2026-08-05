@@ -72,12 +72,6 @@ def check(code: str, key: str, *, check_taken: bool = True) -> list[str]:
     return errors
 
 
-def check_path(path, key: str, **kw) -> list[str]:
-    """按路径读取源码后校验（闸门流程用）"""
-    from pathlib import Path
-    return check(Path(path).read_text(encoding="utf-8"), key, **kw)
-
-
 # ========== key ==========
 
 def _check_key(key: str, check_taken: bool) -> list[str]:

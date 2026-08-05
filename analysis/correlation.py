@@ -19,8 +19,6 @@ from data.cache import save_kline, load_kline, is_cache_fresh
 from data.fetcher import fetch_daily_kline
 
 VALID_WINDOWS = (20, 60, 120)
-VALID_METHODS = ("pearson", "spearman")
-VALID_MODES = ("raw", "index", "cross")
 MARKET_INDEX = "000300"  # 沪深300 作剔除大盘的市场因子
 
 
