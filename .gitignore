@@ -45,6 +45,15 @@ docker-compose.yml
 # Local stock pool (user-specific watchlist)
 config/stocks.json
 
+# Claude Code：本机个人配置（settings.local.json 里是免确认权限之类的本地偏好）不入 git，
+# 但项目级共享配置（hooks/自定义 agent/自定义 slash command/项目技能）照常提交。
+# 必须写 .claude/* 而不是 .claude/——整目录被忽略时 git 不会进目录，下面的 ! 例外会全部失效。
+.claude/*
+!.claude/settings.json
+!.claude/agents/
+!.claude/commands/
+!.claude/skills/
+
 # OS
 .DS_Store
 Thumbs.db
