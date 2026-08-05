@@ -5,17 +5,18 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
-from config.settings import (
+from config.pool import (
     load_stock_pool, get_stock_name, get_stock_type, add_stock, remove_stock,
     add_stocks, remove_stocks,
-    DEFAULT_SIGNAL_SOURCE, SIGNAL_THRESHOLD, SIGNAL_LOOKBACK,
 )
-from data.fetcher import fetch_daily_kline, is_hk_stock, is_index
-from data.stock_list import search_stocks, get_all_stocks
+from config.settings import DEFAULT_SIGNAL_SOURCE, SIGNAL_THRESHOLD, SIGNAL_LOOKBACK
+from data.fetcher import is_hk_stock
+from data.kline import get_kline
+from data.stock_list import search_stocks
 from data.realtime import get_realtime_quotes
-from data.cache import save_kline, load_kline, is_cache_fresh, is_during_trading
+from data.cache import is_during_trading
 from strategy.signals import build_signals
-from strategy.fusion import fuse_signals, SOURCE_COLUMNS
+from strategy.decision import decide, SOURCE_COLUMNS
 from backtest.engine import run_backtest
 from backtest.metrics import calc_metrics
 from strategy.trade_strategy import list_trade_strategies, get_trade_strategy
@@ -82,35 +83,13 @@ st.markdown("""
 # ========== 工具函数 ==========
 
 def get_stock_data(code, days=365, force_refresh=False, stock_type=None):
-    """获取股票数据，优先用新鲜缓存，过期或缓存天数不够则刷新。
+    """页面用的日K入口；实现在 `data/kline.py`（#41 起四处副本合并到数据层）。
 
-    数据源全失败且无任何缓存时返回空 DataFrame，由调用方决定如何提示用户。
+    保留这个薄封装是因为页面代码到处在用这个名字与参数顺序，改名属于第三阶段拆
+    app.py 的事。
     """
-    # 指数/板块用带 type 前缀的 cache key，避免和同代码个股冲突
-    if stock_type == "index":
-        cache_key = f"idx_{code}"
-    elif stock_type == "sector":
-        cache_key = f"sec_{code}"
-    else:
-        cache_key = code
-    if not force_refresh and is_cache_fresh(cache_key):
-        df = load_kline(cache_key)
-        # 缓存覆盖的"日期跨度"够长才直接返回；否则走刷新分支补足天数。
-        # 注意按日历天跨度比，而非行数——交易日数永远 < 日历天数，用 len 比会永远判不足而反复重抓。
-        if df is not None and not df.empty and (df.index.max() - df.index.min()).days >= days - 7:
-            return df
-    try:
-        df = fetch_daily_kline(code, days=days, stock_type=stock_type)
-        if df is not None and not df.empty:
-            save_kline(cache_key, df)
-            return df
-    except Exception:
-        pass
-    # fetch 失败或返回空：用任意已有缓存兜底（哪怕已过期）
-    df = load_kline(cache_key)
-    if df is not None and not df.empty:
-        return df
-    return pd.DataFrame()
+    return get_kline(code, days=days, stock_type=stock_type,
+                     force_refresh=force_refresh)
 
 
 def _market_label(stype, market):
@@ -326,7 +305,7 @@ def _build_overview_rows(source, buy_threshold=SIGNAL_THRESHOLD, sell_threshold=
             rows.append({**meta, "信号值": "-", "推荐": "数据异常", "仓位建议": ""})
             continue
 
-        fusion_result = fuse_signals(signal_df, source=source,
+        fusion_result = decide(signal_df, source=source,
                                       buy_threshold=buy_threshold,
                                       sell_threshold=sell_threshold)
         last = signal_df.iloc[-1]
@@ -554,8 +533,8 @@ def get_news_items(symbol, stock_type, day):
     依赖 get_sentiment_data 已先行采集+打分，这里只读缓存。
     """
     from data.cache import load_news_items
-    from data.news import DEFAULT_WINDOW, _trading_window_start
-    return load_news_items(symbol, since=_trading_window_start(DEFAULT_WINDOW))
+    from data.news import DEFAULT_WINDOW, trading_window_start
+    return load_news_items(symbol, since=trading_window_start(DEFAULT_WINDOW))
 
 
 def _sentiment_badge(score):
@@ -994,7 +973,7 @@ def page_detail():
             signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,
                                             enabled_signals=[source],
                                             progress_cb=_detail_progress if kronos_progress else None)
-            fusion_full = fuse_signals(signal_df_full, source=source,
+            fusion_full = decide(signal_df_full, source=source,
                                         buy_threshold=buy_th, sell_threshold=sell_th)
 
             # 回测 df：严格裁到 time_range_days 范围
@@ -1934,7 +1913,7 @@ def page_custom_strategy():
             signal_df_full = build_signals(df, symbol=symbol, sentiment_scores=None,
                                             enabled_signals=[source],
                                             progress_cb=_cs_progress if kronos_progress else None)
-            fusion_full = fuse_signals(signal_df_full, source=source)
+            fusion_full = decide(signal_df_full, source=source)
             cutoff = signal_df_full.index.max() - pd.Timedelta(days=time_range_days)
             signal_df_bt = signal_df_full.loc[signal_df_full.index >= cutoff]
             fusion_bt = fusion_full.loc[fusion_full.index >= cutoff]
@@ -2416,7 +2395,8 @@ def _render_sector_pick_panel(hot):
     画按钮去打十几次限流接口。只有「未匹配到东财板块」才禁用（那是确定性的不支持，
     等限流窗口也没用，得去补 alias）；没有缓存不等于取不到，允许点下去现场赌一枪。
     """
-    from config.settings import SECTOR_PICK_TOP_N, get_sector_info
+    from config.pool import get_sector_info
+    from config.settings import SECTOR_PICK_TOP_N
     from data.sector_cons import (
         CONS_TTL_DAYS, STATE_CACHED, STATE_UNMATCHED, cached_status,
     )

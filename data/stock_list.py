@@ -2,7 +2,8 @@
 
 import os
 import json
-from datetime import datetime, timedelta
+
+from data.file_cache import is_fresh_hours
 from utils.logger import get_logger
 
 logger = get_logger("stock_list")
@@ -17,16 +18,8 @@ def _ensure_dir():
     os.makedirs(_CACHE_DIR, exist_ok=True)
 
 
-def _is_cache_valid(path: str) -> bool:
-    """缓存文件存在且不超过 24 小时"""
-    if not os.path.exists(path):
-        return False
-    mtime = datetime.fromtimestamp(os.path.getmtime(path))
-    return datetime.now() - mtime < timedelta(hours=_CACHE_MAX_AGE_HOURS)
-
-
 def _load_cache(path: str) -> list[dict] | None:
-    if _is_cache_valid(path):
+    if is_fresh_hours(path, _CACHE_MAX_AGE_HOURS):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return None

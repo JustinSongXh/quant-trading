@@ -11,8 +11,8 @@
 - 资金流排行则是**全市场**——它一次调用就返回全部板块且已排好序，是免费的（见
   `data/fund_flow.py`）。页面因此同时有「全局视角」和「你关注的板块的深度指标」。
 
-取数一律复用 #29 建好的板块管线（`analysis/correlation.py` 里的 `_get_sector_kline`
-带 DuckDB 缓存、`_get_index_returns` 取沪深300、口径与「板块相关性」页完全一致），
+取数一律复用既有管线（`data/kline.py::get_kline` 带 DuckDB 缓存、
+`analysis/correlation.py::index_returns` 取沪深300，口径与「板块相关性」页完全一致），
 不引入新数据源。
 
 收益 / 超额收益的单位是 **%**（pp）；资金净额的单位是 **亿元**。
@@ -21,11 +21,10 @@
 import pandas as pd
 
 import config.settings as cfg
-from analysis.correlation import (
-    MARKET_INDEX, _get_index_returns, _get_sector_kline,
-)
-from config.settings import get_sector_info, get_stock_name
+from analysis.correlation import MARKET_INDEX, index_returns
+from config.pool import get_sector_info, get_stock_name
 from data.fund_flow import net_by_sector
+from data.kline import get_kline
 
 VALID_WINDOWS = (5, 20, 60)
 # 轮动标签用「短窗 vs 长窗」的排名迁移判定；热度分固定用 20 日窗口
@@ -95,14 +94,14 @@ def momentum_table(sector_codes, windows=VALID_WINDOWS,
 
     max_w = max(windows)
     days = int(max_w * 1.5) + 40      # 交易日 → 日历天，兜住周末/停牌（同 correlation）
-    idx_ret = _get_index_returns(max_w, force_refresh=force_refresh)
+    idx_ret = index_returns(max_w, force_refresh=force_refresh)
     index_ok = idx_ret is not None and not idx_ret.empty
     idx_cum = {w: (_cum_return(idx_ret, w) if index_ok else None) for w in windows}
 
     rows, seen = [], {}
     for code in sector_codes:
         row = {"板块": _label(code, seen), "code": code}
-        df = _get_sector_kline(code, days, force_refresh=force_refresh)
+        df = get_kline(code, days, stock_type="sector", force_refresh=force_refresh)
         ret = None
         if df is not None and not df.empty and "close" in df.columns:
             ret = df["close"].pct_change().dropna()
@@ -196,9 +195,13 @@ def rotation_signals(mom: pd.DataFrame, short: int = SHORT_WINDOW,
     return out
 
 
-def _zscore(values: list[float | None]) -> list[float | None]:
+def zscore(values: list[float | None]) -> list[float | None]:
     """池内 z-score（样本标准差 ddof=1）。有效值 < 2 个或标准差为 0 时全给 0.0——
-    此时该分项无区分度，不该左右排序。None 原样保留（缺失不当 0）。"""
+    此时该分项无区分度，不该左右排序。None 原样保留（缺失不当 0）。
+
+    #41 起是公共名（原 `_zscore`）：`analysis/sector_pick.py` 有意复用它以保证两处
+    z-score 口径一致，被别的模块依赖的东西就该是公共 API。
+    """
     got = [v for v in values if v is not None]
     if len(got) < 2:
         return [None if v is None else 0.0 for v in values]
@@ -261,8 +264,8 @@ def hotness(sector_codes, force_refresh: bool = False) -> pd.DataFrame:
         rows.append({"板块": name, "code": code, excess_col: excess,
                      f"{HOTNESS_WINDOW}日资金净额": net, "备注": note})
 
-    z_ex = _zscore([r[excess_col] for r in rows])
-    z_net = _zscore([r[f"{HOTNESS_WINDOW}日资金净额"] for r in rows])
+    z_ex = zscore([r[excess_col] for r in rows])
+    z_net = zscore([r[f"{HOTNESS_WINDOW}日资金净额"] for r in rows])
     weights = getattr(cfg, "SECTOR_HOTNESS_WEIGHTS", {})
     w_ex = float(weights.get(W_EXCESS, 1.0))
     w_net = float(weights.get(W_NET, 1.0))

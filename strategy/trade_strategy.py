@@ -9,7 +9,6 @@
 T+1 / 涨跌停等成交约束复用 broker 自身规则。
 """
 
-import importlib
 import logging
 import re
 import threading
@@ -17,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config.settings import POSITION_SIZING
+from utils.plugin_registry import discover_classes
 
 logger = logging.getLogger(__name__)
 
@@ -289,37 +289,19 @@ _registry_lock = threading.RLock()
 def _discover_custom() -> dict:
     """扫 strategy/custom/*.py，收集其中的 TradeStrategy 子类。
 
-    只扫顶层非下划线开头的 .py（_staging/ 和 _rejected/ 因此被天然排除）。
-    单个文件出错只记 warning 并跳过——一个坏策略不能拖垮整站启动。
+    发现机制与两个 provider 注册表共用 `utils/plugin_registry.py`（#41）：只扫顶层非
+    下划线开头的 .py（`_staging/` 和 `_rejected/` 因此被天然排除）、一个文件恰好一个
+    子类且 key 等于文件名、单个文件出错只记 warning 并跳过（一个坏策略不能拖垮整站）。
+    这里多一条自己的规则：**key 不许与内置策略冲突**。
     """
-    found = {}
-    if not _CUSTOM_DIR.is_dir():
-        return found
-
-    for path in sorted(_CUSTOM_DIR.glob("*.py")):
-        stem = path.stem
-        if stem.startswith("_"):
-            continue
-        try:
-            module = importlib.import_module(f"strategy.custom.{stem}")
-            importlib.reload(module)  # 保存后立即生效，无需重启进程
-            classes = [
-                obj for obj in vars(module).values()
-                if isinstance(obj, type) and issubclass(obj, TradeStrategy)
-                and obj is not TradeStrategy and obj.__module__ == module.__name__
-            ]
-            if len(classes) != 1:
-                raise ValueError(f"应恰好包含 1 个 TradeStrategy 子类，实际 {len(classes)} 个")
-            cls = classes[0]
-            if cls.key != stem:
-                raise ValueError(f"key={cls.key!r} 与文件名 {stem!r} 不一致")
-            if cls.key in _BUILTIN:
-                raise ValueError(f"key={cls.key!r} 与内置策略冲突")
-            found[cls.key] = cls
-        except Exception as e:
-            logger.warning("跳过自定义策略 %s：%s: %s", path.name, type(e).__name__, e)
-
-    return found
+    return discover_classes(
+        package="strategy.custom",
+        directory=_CUSTOM_DIR,
+        base_cls=TradeStrategy,
+        label="自定义策略",
+        reject=lambda cls: (f"key={cls.key!r} 与内置策略冲突"
+                            if cls.key in _BUILTIN else None),
+    )
 
 
 def _registry() -> dict:

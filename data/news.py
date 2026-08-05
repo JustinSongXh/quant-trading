@@ -41,8 +41,12 @@ def news_detail_url(source, stock_code, external_id, published_at=None):
         return None
 
 
-def _trading_window_start(lookback_trading_days: int) -> datetime:
-    """过去 N 个有效交易日里最早一天的 00:00"""
+def trading_window_start(lookback_trading_days: int) -> datetime:
+    """过去 N 个有效交易日里最早一天的 00:00
+
+    #41 起是公共名（原 `_trading_window_start`）：`analysis/sentiment.py` 与 `app.py`
+    都要按同一个窗口口径读新闻，被别的模块依赖的东西就该是公共 API。
+    """
     today = datetime.now().date()
     try:
         import akshare as ak
@@ -83,7 +87,7 @@ def fetch_stock_news(
     返回列：source, external_id, stock_code, title, content,
     published_at, fetched_at, sentiment_score（按 published_at 倒序）。
     """
-    window_start = _trading_window_start(lookback_trading_days)
+    window_start = trading_window_start(lookback_trading_days)
     end = datetime.now()
 
     for src in _sources_for(symbol, stock_type):
@@ -109,7 +113,7 @@ def purge_expired_news(lookback_trading_days: int = DEFAULT_WINDOW) -> int:
 
     供定时任务调用：采集/打分路径只写入，清理统一在这里做。
     """
-    window_start = _trading_window_start(lookback_trading_days)
+    window_start = trading_window_start(lookback_trading_days)
     deleted = purge_news_outside_window(window_start)
     logger.info(f"清理窗口外新闻：删除 {deleted} 条（窗口起点 {window_start:%Y-%m-%d}）")
     return deleted

@@ -29,8 +29,7 @@
 import json
 import os
 
-from datetime import datetime, timedelta
-
+from data.file_cache import cache_mtime, is_fresh_days
 from utils.logger import get_logger
 
 logger = get_logger("sector_cons")
@@ -76,17 +75,13 @@ _last_good: tuple[int, str] | None = None
 
 
 def _is_fresh(path: str, days: int) -> bool:
-    """mtime 惯例同 data/sector_list.py::_is_cache_valid，只是 TTL 按天给"""
-    if not os.path.exists(path):
-        return False
-    mtime = datetime.fromtimestamp(os.path.getmtime(path))
-    return datetime.now() - mtime < timedelta(days=days)
+    """mtime 惯例同 data/file_cache.py，只是 TTL 按天给"""
+    return is_fresh_days(path, days)
 
 
 def _cache_date(path: str) -> str | None:
-    if not os.path.exists(path):
-        return None
-    return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+    mtime = cache_mtime(path)
+    return mtime.strftime("%Y-%m-%d %H:%M") if mtime else None
 
 
 def _read_cache(path: str):
@@ -551,7 +546,7 @@ def refresh_pool_constituents() -> dict:
     东财限流是窗口性的，一晚多试几次大概率撞上可用窗口；白天用户点「选股」时就直接命中
     缓存。返回 `{板块名: 成分股数 or None}` 便于日志核对。
     """
-    from config.settings import load_stock_pool
+    from config.pool import load_stock_pool
 
     out = {}
     for s in load_stock_pool():

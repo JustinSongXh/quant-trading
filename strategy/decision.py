@@ -1,4 +1,9 @@
-"""单源信号决策：按选定的信号源 + 阈值生成 decision/strength"""
+"""单源信号决策：按选定的信号源 + 阈值生成 decision/strength。
+
+#41 从 `strategy/fusion.py` 改名而来：模块叫「融合」而实际只做「单源选择 + 阈值判定」，
+名字承诺了不存在的能力（README 一度还写着「综合分数 = 技术×0.5 + 缠论×0.5」）。真要做
+多源融合是另一件事，届时该有一个明确的 issue 与公式，而不是靠一个旧文件名暗示。
+"""
 
 import pandas as pd
 from config.settings import DEFAULT_SIGNAL_SOURCE, SIGNAL_THRESHOLD
@@ -11,9 +16,9 @@ SOURCE_COLUMNS = {
 }
 
 
-def fuse_signals(df: pd.DataFrame, source: str = DEFAULT_SIGNAL_SOURCE,
-                 buy_threshold: float = SIGNAL_THRESHOLD,
-                 sell_threshold: float | None = None) -> pd.DataFrame:
+def decide(df: pd.DataFrame, source: str = DEFAULT_SIGNAL_SOURCE,
+           buy_threshold: float = SIGNAL_THRESHOLD,
+           sell_threshold: float | None = None) -> pd.DataFrame:
     """按单一信号源生成交易决策
 
     Args:

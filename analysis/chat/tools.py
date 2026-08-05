@@ -129,7 +129,7 @@ def _name_from_cached_lists(symbol: str) -> str | None:
 
 def _resolve(symbol: str) -> tuple[str, str]:
     """(标的类型, 显示名)。池内标的按池里的配置，池外查已缓存的清单，都没有就用代码。"""
-    from config.settings import get_stock_name, get_stock_type
+    from config.pool import get_stock_name, get_stock_type
 
     stype = get_stock_type(symbol)
     name = get_stock_name(symbol, stype)
@@ -139,18 +139,18 @@ def _resolve(symbol: str) -> tuple[str, str]:
 
 
 def _kline(symbol: str, days: int, stype: str):
-    """日K：板块走 #29 的板块管线，个股/指数走 #35 的个股管线（都带缓存，口径与页面一致）"""
-    if stype == "sector":
-        from analysis.correlation import _get_sector_kline
+    """日K：走统一的取数管线 `data/kline.py::get_kline`（带缓存，口径与页面一致）。
 
-        return _get_sector_kline(symbol, days)
-    from analysis.sector_pick import _get_stock_kline
+    #41 前这里按 stype 分叉去调 `correlation._get_sector_kline` / `sector_pick.
+    _get_stock_kline` 两个私有副本，现在板块/个股/指数只差一个 stock_type 参数。
+    """
+    from data.kline import get_kline
 
-    return _get_stock_kline(symbol, days=days, stock_type=stype)
+    return get_kline(symbol, days=days, stock_type=stype)
 
 
 def _pool_sectors() -> list[dict]:
-    from config.settings import load_stock_pool
+    from config.pool import load_stock_pool
 
     return [s for s in load_stock_pool() if s.get("type") == "sector"]
 
@@ -158,7 +158,7 @@ def _pool_sectors() -> list[dict]:
 # ========== 工具实现 ==========
 
 def _list_pool(args: dict) -> dict:
-    from config.settings import load_stock_pool
+    from config.pool import load_stock_pool
 
     pool = load_stock_pool()
     rows = [{"code": s["code"], "name": s["name"],
@@ -228,7 +228,7 @@ def _get_kline_summary(args: dict) -> dict:
 
 def _get_signals(args: dict) -> dict:
     from config.settings import SIGNAL_LOOKBACK, SIGNAL_THRESHOLD
-    from strategy.fusion import SOURCE_COLUMNS, fuse_signals
+    from strategy.decision import SOURCE_COLUMNS, decide
     from strategy.signals import build_signals
 
     symbol = str(args["symbol"]).strip()
@@ -242,7 +242,7 @@ def _get_signals(args: dict) -> dict:
                 "hint": f"{symbol} 日K取不到，信号算不出来"}
 
     sig = build_signals(df, symbol=symbol, enabled_signals=[source])
-    fused = fuse_signals(sig, source=source)
+    fused = decide(sig, source=source)
     col = SOURCE_COLUMNS[source]
     tail = sig.tail(SIGNAL_TAIL)
     series = [{"date": str(i.date()), "signal": _clean(r[col]),
@@ -254,7 +254,7 @@ def _get_signals(args: dict) -> dict:
         "available": True, "symbol": symbol, "name": name, "source": source,
         "threshold": SIGNAL_THRESHOLD, "latest": latest, "recent": series,
         "note": f"decision 1=买入 / -1=卖出 / 0=观望，由 |signal| 与阈值 {SIGNAL_THRESHOLD} "
-                f"比较得出（strategy/fusion.py 的确定性规则）。这是既有信号源的输出，"
+                f"比较得出（strategy/decision.py 的确定性规则）。这是既有信号源的输出，"
                 f"不要据此给出投资建议，也不要自己改阈值重判。",
     }
 

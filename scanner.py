@@ -1,12 +1,12 @@
 """盘后信号扫描：每日收盘后运行，扫描股票池，发现买卖信号推送微信"""
 
-import sys
 from datetime import datetime
-from config.settings import load_stock_pool, get_stock_name, DEFAULT_SIGNAL_SOURCE
+from config.pool import load_stock_pool
+from config.settings import DEFAULT_SIGNAL_SOURCE
 from data.fetcher import fetch_daily_kline
 from data.cache import save_kline, load_kline
 from strategy.signals import build_signals
-from strategy.fusion import fuse_signals, SOURCE_COLUMNS
+from strategy.decision import decide, SOURCE_COLUMNS
 from notify.wechat import send_wechat
 from utils.logger import get_logger
 
@@ -41,7 +41,7 @@ def scan_all() -> list[dict]:
             source = DEFAULT_SIGNAL_SOURCE
             signal_df = build_signals(df, symbol=code, sentiment_scores=None,
                                        enabled_signals=[source])
-            fusion_result = fuse_signals(signal_df, source=source)
+            fusion_result = decide(signal_df, source=source)
 
             # 取最后一个交易日的信号
             if len(fusion_result) == 0:
