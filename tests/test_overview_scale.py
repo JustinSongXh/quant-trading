@@ -28,19 +28,19 @@ BARS = 200
 
 
 def _app_const(name: str):
-    """从 app.py **源码**里读一个模块级常量（AST，不 import）。
+    """页面模块里的常量。
 
-    `import app` 会执行整个 Streamlit 脚本（顶层就有页面路由），代价是拿真实股票池跑一遍
-    总览页；测试只想知道 COMPACT_ROWS 是几，不该为此打一遍网络。
+    #42 之前这里得用 AST 从 `app.py` 源码里读——那时页面全在 app.py 里，而 `import app`
+    会执行整个 Streamlit 脚本（顶层就有页面路由），代价是拿真实股票池跑一遍总览页。
+    拆分之后页面模块 import 无副作用，直接读属性即可。
     """
-    import ast
+    import ui.pages.overview as ov
+    import ui.pages.sector as sec
 
-    tree = ast.parse(open(APP, encoding="utf-8").read())
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            return ast.literal_eval(node.value)
-    raise AssertionError(f"app.py 里找不到常量 {name}")
+    for module in (ov, sec):
+        if hasattr(module, name):
+            return getattr(module, name)
+    raise AssertionError(f"ui/pages 里找不到常量 {name}")
 
 
 def _kline(start=100.0, step=0.5):

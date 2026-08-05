@@ -6,10 +6,10 @@
 
 A 股 + 港股量化分析系统：本地取数 → 确定性计算（技术指标 / 缠论 / Kronos 预测 / 新闻情绪 / 基本面 / 板块相关性 / 板块轮动 / 板块内选股）→ Streamlit 页面 + 回测 + 盘后扫描推送。
 
-- **唯一在用的前端是 `app.py`**（Streamlit，7 页：全局信号总览 / 单股票分析 / 新闻列表 / 股票池管理 / 板块分析 / 自定义策略 / AI 分析助手）。
-- 曾经有一个 FastAPI 后端 `api/server.py`（给微信小程序用），小程序不做了，代码已在 #40 删除。**不要再引入第二套前端/接口层**，也不要拿它的历史实现当对照——讨论页面行为、信号链路、一致性时只看 `app.py`。
+- **唯一在用的前端是 Streamlit**，7 页：全局信号总览 / 单股票分析 / 新闻列表 / 股票池管理 / 板块分析 / 自定义策略 / AI 分析助手。入口是 `app.py`（只有配置 + CSS + 路由表，70 行），页面实现在 `ui/pages/*.py`，跨页共用的展示助手在 `ui/shared.py`、情绪/基本面卡片在 `ui/cards.py`（#42 拆的，拆前 `app.py` 是 2724 行）。
+- 曾经有一个 FastAPI 后端 `api/server.py`（给微信小程序用），小程序不做了，代码已在 #40 删除。**不要再引入第二套前端/接口层**，也不要拿它的历史实现当对照。
 - 命令行入口：`main.py`（批量回测）、`scanner.py`（盘后扫描 + PushPlus 推送）、`purge_news.py`（清理窗口外新闻）。
-- app 进程内还有三个 APScheduler 定时任务（03:00 清新闻、03:20 刷板块成分股缓存、15:40 板块资金流快照），见 `app.py::_start_background_jobs`。
+- app 进程内还有三个 APScheduler 定时任务（03:00 清新闻、03:20 刷板块成分股缓存、15:40 板块资金流快照），见 `ui/jobs.py::start_background_jobs`。
 
 ## 2. 运行环境：只在 Docker 里跑
 
@@ -44,7 +44,7 @@ docker exec quant-app python -c "..."                                # 临时验
 # 单个文件
 docker exec quant-app python /app/tests/test_sector_cons.py
 
-# 全量（27 个文件，当前应全绿）
+# 全量（28 个文件，当前应全绿）
 for f in tests/test_*.py; do
   docker exec quant-app python /app/$f >/dev/null 2>&1 && echo "OK   $f" || echo "FAIL $f"
 done
@@ -54,9 +54,9 @@ done
 
 **三条铁律**（违反过、都疼过）：
 
-1. **不打网络**：所有取数一律 mock。注意 `analysis/*` 有些模块在**顶层** `from data.fetcher import ...`，只 mock `data.fetcher` 不影响已绑定的引用，得直接打到调用方那个名字上。
-2. **不碰生产数据**：DuckDB 指到临时库、股票池指到临时文件，别让测试写 `data/cache/market.duckdb` 或 `config/stocks.json`。
-3. **不要 `import app`**：`app.py` 顶层就起调度器并执行页面路由，import 会真的拿**真实股票池**跑一遍总览页并打网络（实测触发 95 次板块快照请求）。要测页面用 `streamlit.testing.v1.AppTest`；只想读 `app.py` 里的模块级常量，按 `tests/test_overview_scale.py` 的做法用 AST 从源码读。
+1. **不打网络**：所有取数一律 mock，替 `data.fetcher.fetch_daily_kline` / `data.realtime.get_realtime_quotes` 这两处源头即可——经过 `data/kline.py` 的取数路径都是**按模块引用**的，替源模块就能拦住。反过来说：**新代码也要按模块引用**（`from data import realtime` 然后 `realtime.get_realtime_quotes(...)`），一旦 from-import 了具体函数，那个名字在 import 时就绑死了，测试的替身打不进来（`ui/pages/*.py` 只 import 一次并常驻，尤其吃这一条）。
+2. **不碰生产数据**：DuckDB 指到临时库（`data.cache.CACHE_DB_PATH`）、股票池指到临时文件（`config.pool._STOCKS_FILE`），别让测试写 `data/cache/market.duckdb` 或 `config/stocks.json`。
+3. **不要 `import app`**：入口 `app.py` 顶层就起调度器并执行路由，import 它会真的拿**真实股票池**跑一遍总览页并打网络（实测触发 95 次板块快照请求）。但 **`ui/**` 下的模块可以随便 import**（#42 起 import 无副作用，`tests/test_ui_split.py` 守着这一点）：要常量就 `from ui.pages.overview import COMPACT_ROWS`，要测整页渲染用 `streamlit.testing.v1.AppTest.from_file("app.py")`。
 
 ## 4. 装依赖
 
@@ -129,6 +129,7 @@ docker exec quant-app pip install <pkg>     # 装在容器 fs 内，重启保留
 - `config/settings.py` 只放常量与 `.env` 读取，只依赖 stdlib + dotenv；股票池（自选清单）的读写在 `config/pool.py`——那是数据访问，不是配置。
 - 被别的模块引用的东西**不许是私有名**（`_foo`）。跨模块要用就改成公共名，或者说明它本该搬家。
 - 「丢一个文件进目录就注册一个插件」只有一套实现：`utils/plugin_registry.py`（两个 provider 注册表 + 自定义策略发现共用）。
+- UI 分三层：`app.py` 只做路由（加一页 = 加一个 `ui/pages/xxx.py` + 在 `PAGES` 表里加一行）、`ui/pages/*.py` 一页一个模块、`ui/shared.py` 只收**两个以上页面**都在用的助手（只服务一页的留在那一页里）。`ui/**` 的模块必须保持 import 无副作用。
 
 **取回来的数据要带出处和新鲜度**：缓存类返回值必须给 `fetched_at` 与 `stale`，并且**一路传到页面上显示**。「过期的数据远好过没有」的前提是用户知道它过期了——参考 `data/sector_cons.py::get_sector_constituents`。
 
