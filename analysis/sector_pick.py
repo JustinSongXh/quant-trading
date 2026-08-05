@@ -26,7 +26,7 @@
 
     排序分 = w_tech · z(技术信号) + w_excess · z(相对板块超额收益) + w_fund · 基本面加减分
 
-前两项在**候选集内**做 z-score（复用 `analysis/rotation.py::_zscore`，ddof=1、有效值
+前两项在**候选集内**做 z-score（复用 `analysis/rotation.py::zscore`，ddof=1、有效值
 不足 2 个给 0）。权重取 `config/settings.py::SECTOR_PICK_WEIGHTS`，运行时读。
 
 缠论信号照样算、照样返回、页面照样显示，但**不进排序分**——issue 定的公式只有三项。
@@ -38,13 +38,11 @@
 import pandas as pd
 
 import config.settings as cfg
-from analysis.correlation import _get_sector_kline
 from analysis.fundamental import summarize
-from analysis.rotation import _zscore
+from analysis.rotation import zscore
 from config.settings import get_sector_info
-from data.cache import is_cache_fresh, load_kline, save_kline
-from data.fetcher import fetch_daily_kline
 from data.fundamentals import get_fundamentals
+from data.kline import get_kline
 from data.sector_cons import get_sector_constituents, unavailable_reason
 from strategy.signals import build_signals
 from utils.logger import get_logger
@@ -103,32 +101,6 @@ def flag_score(flags: list[str] | None) -> tuple[float, list[str]]:
     return round(score, 3), unknown
 
 
-def _get_stock_kline(code: str, days: int = KLINE_DAYS, stock_type: str = "stock",
-                     force_refresh: bool = False) -> pd.DataFrame:
-    """个股/指数日K，缓存键与用法同 app.get_stock_data（不依赖 app.py，避免导入触发
-    Streamlit 脚本执行；写法与 correlation._get_sector_kline 一致）。
-
-    选股只用得上 stock_type="stock"；index 分支是给 #36 的对话工具复用的——指数与个股
-    的取数/缓存逻辑一模一样，只差 cache key 前缀，没必要再抄一份。板块另有
-    correlation._get_sector_kline（带板块专属的取数分支）。
-    """
-    cache_key = f"idx_{code}" if stock_type == "index" else code
-    if not force_refresh and is_cache_fresh(cache_key):
-        df = load_kline(cache_key)
-        if df is not None and not df.empty and \
-                (df.index.max() - df.index.min()).days >= days - 7:
-            return df
-    try:
-        df = fetch_daily_kline(code, days=days, stock_type=stock_type)
-        if df is not None and not df.empty:
-            save_kline(cache_key, df)
-            return df
-    except Exception as e:
-        logger.info(f"{code} 日K取数失败: {e}")
-    df = load_kline(cache_key)
-    return df if df is not None else pd.DataFrame()
-
-
 def _cum_return(closes: pd.Series, window: int) -> float | None:
     """近 window 个交易日的累计收益（%）。不足 window+1 根 K 线返回 None。"""
     s = pd.Series(closes).dropna()
@@ -154,8 +126,8 @@ def _coarse_screen(constituents: list[dict], top_n: int) -> list[dict]:
 def _sector_return(sector_code: str, window: int,
                    force_refresh: bool = False) -> float | None:
     """板块指数近 window 交易日累计收益（%），取不到返回 None（超额项随之缺失）。"""
-    df = _get_sector_kline(sector_code, int(window * 1.5) + 40,
-                           force_refresh=force_refresh)
+    df = get_kline(sector_code, int(window * 1.5) + 40, stock_type="sector",
+                   force_refresh=force_refresh)
     if df is None or df.empty or "close" not in df.columns:
         return None
     return _cum_return(df["close"], window)
@@ -165,7 +137,8 @@ def _compute_one(item: dict, sector_ret: float | None, window: int,
                  force_refresh: bool) -> tuple[dict | None, str | None]:
     """细算一只：(候选行, 失败原因)。日K取不到/不足 → (None, 原因)，由调用方进 warnings。"""
     code, name = item["code"], item.get("name") or item["code"]
-    df = _get_stock_kline(code, force_refresh=force_refresh)
+    df = get_kline(code, days=KLINE_DAYS, stock_type="stock",
+                   force_refresh=force_refresh)
     if df is None or df.empty:
         return None, f"{name}({code}) 日K取数失败，已跳过"
     if len(df) < window + 1:
@@ -288,8 +261,8 @@ def pick(sector_code: str, kind: str | None = None, top_n: int | None = None,
         warnings.append("板块指数日K取不到，「相对板块超额收益」这一列缺失、按 0 计入排序分")
 
     # z-score 在**候选集内**算（不是全成分股，也不是全市场）
-    z_tech = _zscore([r["technical"] for r in rows])
-    z_excess = _zscore([r["excess"] for r in rows])
+    z_tech = zscore([r["technical"] for r in rows])
+    z_excess = zscore([r["excess"] for r in rows])
     weights = getattr(cfg, "SECTOR_PICK_WEIGHTS", {})
     w_tech = float(weights.get(W_TECH, 1.0))
     w_excess = float(weights.get(W_EXCESS, 1.0))

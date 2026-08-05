@@ -2,7 +2,8 @@
 
 import os
 import json
-from datetime import datetime, timedelta
+
+from data.file_cache import is_fresh_hours
 from utils.logger import get_logger
 
 logger = get_logger("sector_list")
@@ -10,13 +11,6 @@ logger = get_logger("sector_list")
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 _SECTOR_CACHE = os.path.join(_CACHE_DIR, "sectors.json")
 _CACHE_MAX_AGE_HOURS = 24
-
-
-def _is_cache_valid(path: str) -> bool:
-    if not os.path.exists(path):
-        return False
-    mtime = datetime.fromtimestamp(os.path.getmtime(path))
-    return datetime.now() - mtime < timedelta(hours=_CACHE_MAX_AGE_HOURS)
 
 
 def _fetch_sectors() -> list[dict]:
@@ -45,7 +39,7 @@ def _fetch_sectors() -> list[dict]:
 
 def get_sector_list(force_refresh: bool = False) -> list[dict]:
     """获取全部板块列表，优先读 24h 缓存。"""
-    if not force_refresh and _is_cache_valid(_SECTOR_CACHE):
+    if not force_refresh and is_fresh_hours(_SECTOR_CACHE, _CACHE_MAX_AGE_HOURS):
         with open(_SECTOR_CACHE, "r", encoding="utf-8") as f:
             return json.load(f)
 

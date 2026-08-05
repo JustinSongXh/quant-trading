@@ -34,9 +34,14 @@ def _cum(daily_pct, w):
 
 
 def _patch(klines: dict, index_daily=None, nets=None, kinds=None):
-    """替掉 rotation 模块里的取数依赖（都是模块级 import，直接赋属性即可）"""
-    rot._get_sector_kline = lambda code, days, force_refresh=False: klines.get(code)
-    rot._get_index_returns = lambda window, force_refresh=False: (
+    """替掉 rotation 模块里的取数依赖（都是模块级 import，直接赋属性即可）
+
+    #41 起板块日K统一走 `data/kline.py::get_kline`（原 `correlation._get_sector_kline`），
+    沪深300 收益率是 `correlation.index_returns`（原 `_get_index_returns`）。
+    """
+    rot.get_kline = lambda code, days, stock_type=None, force_refresh=False: \
+        klines.get(code)
+    rot.index_returns = lambda window, force_refresh=False: (
         None if index_daily is None
         else _kline(index_daily)["close"].pct_change().dropna()
     )

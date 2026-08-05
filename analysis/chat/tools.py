@@ -139,14 +139,14 @@ def _resolve(symbol: str) -> tuple[str, str]:
 
 
 def _kline(symbol: str, days: int, stype: str):
-    """日K：板块走 #29 的板块管线，个股/指数走 #35 的个股管线（都带缓存，口径与页面一致）"""
-    if stype == "sector":
-        from analysis.correlation import _get_sector_kline
+    """日K：走统一的取数管线 `data/kline.py::get_kline`（带缓存，口径与页面一致）。
 
-        return _get_sector_kline(symbol, days)
-    from analysis.sector_pick import _get_stock_kline
+    #41 前这里按 stype 分叉去调 `correlation._get_sector_kline` / `sector_pick.
+    _get_stock_kline` 两个私有副本，现在板块/个股/指数只差一个 stock_type 参数。
+    """
+    from data.kline import get_kline
 
-    return _get_stock_kline(symbol, days=days, stock_type=stype)
+    return get_kline(symbol, days=days, stock_type=stype)
 
 
 def _pool_sectors() -> list[dict]:

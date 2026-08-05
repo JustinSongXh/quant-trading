@@ -64,7 +64,7 @@ def _patch(cons=None, klines=None, sector_kline=None, signals=None,
     Returns: (还原函数, signal spy)
     """
     saved = {k: getattr(sp, k) for k in
-             ("get_sector_constituents", "_get_stock_kline", "_get_sector_kline",
+             ("get_sector_constituents", "get_kline",
               "build_signals", "get_fundamentals", "summarize", "unavailable_reason",
               "get_sector_info")}
     klines = klines or {}
@@ -75,10 +75,14 @@ def _patch(cons=None, klines=None, sector_kline=None, signals=None,
     # 依赖它，这里直接给定
     sp.get_sector_info = lambda code: ("消费电子", "industry")
     sp.get_sector_constituents = lambda name, kind, force_refresh=False, attempts=1: cons
-    sp._get_stock_kline = lambda code, days=sp.KLINE_DAYS, force_refresh=False: \
-        klines.get(code, base)
-    sp._get_sector_kline = lambda code, days, force_refresh=False: (
-        sector_kline if sector_kline is not None else _kline(0.0005))
+    # #41 起个股/板块日K都走 data/kline.py::get_kline，只差 stock_type——测试也只剩
+    # 一个替身，按 stock_type 分派（原先是 _get_stock_kline / _get_sector_kline 两个）
+    def _kline_stub(code, days=sp.KLINE_DAYS, stock_type=None, force_refresh=False):
+        if stock_type == "sector":
+            return sector_kline if sector_kline is not None else _kline(0.0005)
+        return klines.get(code, base)
+
+    sp.get_kline = _kline_stub
     sp.build_signals = spy
     sp.get_fundamentals = lambda code, *a, **k: (fundamentals or {}).get(code)
     sp.summarize = lambda fund: fund       # 测试里 fundamentals 直接给 {"flags": [...]}
@@ -184,7 +188,7 @@ def test_zscore_is_computed_within_candidate_set():
         restore()
     got = {c["code"]: c["z_technical"] for c in res["candidates"]}
     expect = pd.Series([1.0, 0.0, -1.0])
-    mu, sd = expect.mean(), expect.std()      # ddof=1，同 rotation._zscore
+    mu, sd = expect.mean(), expect.std()      # ddof=1，同 rotation.zscore
     assert abs(got["600000"] - (1.0 - mu) / sd) < 1e-3
     assert abs(got["600002"] - (-1.0 - mu) / sd) < 1e-3
     # 其余 81 只（默认技术值 0.1）没参与统计

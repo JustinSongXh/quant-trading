@@ -10,7 +10,7 @@
 """
 
 from data.cache import load_news_items, load_unscored_news, update_sentiment_scores
-from data.news import DEFAULT_WINDOW, _trading_window_start, fetch_stock_news
+from data.news import DEFAULT_WINDOW, trading_window_start, fetch_stock_news
 from utils.logger import get_logger
 
 import threading
@@ -114,7 +114,7 @@ def analyze_sentiment(
     score_pending(stock_code)
 
     # 3) 读窗口内已打分数据，按 日期 × 来源 聚合
-    window_start = _trading_window_start(lookback_trading_days)
+    window_start = trading_window_start(lookback_trading_days)
     df = load_news_items(stock_code, since=window_start)
     if not df.empty:
         df = df.dropna(subset=["sentiment_score"]).copy()

@@ -3,7 +3,7 @@
 对一组板块的日收益率序列做两两相关系数计算，供「板块相关性」页三个视图使用：
 相关性热力图、单板块联动榜、负相关对冲榜。
 
-只复用现有板块 K 线管线（THS 数据源、DuckDB 缓存，见 app.get_stock_data），
+只复用现有板块 K 线管线（THS 数据源、DuckDB 缓存，见 `data/kline.py::get_kline`），
 不引入新数据源。收益率 = 收盘价 pct_change，按日期 inner join 对齐后 DataFrame.corr。
 
 相关模式（mode）：
@@ -15,8 +15,7 @@
 import pandas as pd
 
 from config.settings import get_stock_name
-from data.cache import save_kline, load_kline, is_cache_fresh
-from data.fetcher import fetch_daily_kline
+from data.kline import get_kline
 
 VALID_WINDOWS = (20, 60, 120)
 MARKET_INDEX = "000300"  # 沪深300 作剔除大盘的市场因子
@@ -31,25 +30,6 @@ def _col_label(code: str, seen: dict) -> str:
     return name
 
 
-def _get_sector_kline(code: str, days: int, force_refresh: bool = False) -> pd.DataFrame:
-    """取板块日K线，逻辑同 app.get_stock_data 的板块分支（sec_ 缓存键 + 新鲜度兜底），
-    但不依赖 app.py（避免导入触发 Streamlit 脚本执行）。"""
-    cache_key = f"sec_{code}"
-    if not force_refresh and is_cache_fresh(cache_key):
-        df = load_kline(cache_key)
-        if df is not None and not df.empty and (df.index.max() - df.index.min()).days >= days - 7:
-            return df
-    try:
-        df = fetch_daily_kline(code, days=days, stock_type="sector")
-        if df is not None and not df.empty:
-            save_kline(cache_key, df)
-            return df
-    except Exception:
-        pass
-    df = load_kline(cache_key)
-    return df if df is not None else pd.DataFrame()
-
-
 def compute_returns(sector_codes, window=60, force_refresh=False) -> pd.DataFrame:
     """取各板块近 window 交易日的日收益率，按日期 inner join 对齐。
 
@@ -60,7 +40,7 @@ def compute_returns(sector_codes, window=60, force_refresh=False) -> pd.DataFram
     series = {}
     seen = {}
     for code in sector_codes:
-        df = _get_sector_kline(code, days, force_refresh=force_refresh)
+        df = get_kline(code, days, stock_type="sector", force_refresh=force_refresh)
         if df is None or df.empty or "close" not in df.columns:
             continue
         ret = df["close"].pct_change().dropna()
@@ -74,20 +54,14 @@ def compute_returns(sector_codes, window=60, force_refresh=False) -> pd.DataFram
     return pd.concat(series, axis=1, join="inner").dropna(how="any")
 
 
-def _get_index_returns(window, force_refresh=False) -> pd.Series | None:
-    """沪深300 日收益率序列，供剔除大盘用。取不到返回 None（由调用方退回原始相关）。"""
+def index_returns(window, force_refresh=False) -> pd.Series | None:
+    """沪深300 日收益率序列，供剔除大盘用。取不到返回 None（由调用方退回原始相关）。
+
+    #41 起改名（原 `_get_index_returns`）：`analysis/rotation.py` 一直在跨模块引用它，
+    被别的模块依赖的东西就该是公共名。
+    """
     days = int(window * 1.5) + 40
-    cache_key = f"idx_{MARKET_INDEX}"
-    df = None
-    if not force_refresh and is_cache_fresh(cache_key):
-        df = load_kline(cache_key)
-    if df is None or df.empty:
-        try:
-            df = fetch_daily_kline(MARKET_INDEX, days=days, stock_type="index")
-            if df is not None and not df.empty:
-                save_kline(cache_key, df)
-        except Exception:
-            df = load_kline(cache_key)
+    df = get_kline(MARKET_INDEX, days, stock_type="index", force_refresh=force_refresh)
     if df is None or df.empty or "close" not in df.columns:
         return None
     return df["close"].pct_change().dropna()
@@ -118,7 +92,7 @@ def _model_returns(sector_codes, window, mode, force_refresh=False) -> pd.DataFr
     if mode == "cross":
         return _residualize(returns, returns.mean(axis=1))
     if mode == "index":
-        idx_ret = _get_index_returns(window, force_refresh=force_refresh)
+        idx_ret = index_returns(window, force_refresh=force_refresh)
         if idx_ret is None or idx_ret.empty:
             return returns  # 指数取不到就退回原始相关
         return _residualize(returns, idx_ret)

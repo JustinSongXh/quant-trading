@@ -44,7 +44,7 @@ def _app_const(name: str):
 
 def _kline(start=100.0, step=0.5):
     # index 必须叫 "date"：data/cache.py::save_kline 靠这个名字 reset_index，
-    # 不命名的话它会 KeyError，而 _get_sector_kline 用 except Exception 兜住后
+    # 不命名的话它会 KeyError，而 data/kline.py::get_kline 用 except Exception 兜住后
     # 回落成空表——表现出来就是「收益率数据不足」，很难查
     idx = pd.date_range("2026-01-01", periods=BARS, freq="D", name="date")
     close = pd.Series([start + step * i for i in range(BARS)], index=idx)
@@ -98,27 +98,21 @@ class _Env:
                     for c, t in items}
 
         realtime.get_realtime_quotes = fake_quotes
+        # 替 data.fetcher 这一枪就够了：#41 起所有日K都经 data/kline.py，而它是按模块
+        # 引用 `fetcher.fetch_daily_kline` 的（不是 from-import 绑死函数对象），所以
+        # 个股、指数、板块三条路径一起被拦住。#41 前 analysis.correlation 在自己模块
+        # 顶层 from-import 了这个名字，必须再单独打一枪，否则板块日K会走真实网络。
         fetcher.fetch_daily_kline = lambda symbol, days=365, stock_type=None: _kline()
-
-        # analysis.correlation 在自己模块顶层 `from data.fetcher import fetch_daily_kline`，
-        # 那个名字在它第一次被 import 时就绑好了——只改 data.fetcher 不会影响它
-        # （app.py 反而不受影响：AppTest 每次 run 都重新执行整个脚本，import 会重新绑）。
-        # 不单独打这一枪，板块日K就会走真实网络，相关性矩阵拿到空表。
-        import analysis.correlation as corr
-        self.saved["corr_kline"] = corr.fetch_daily_kline
-        corr.fetch_daily_kline = fetcher.fetch_daily_kline
         return self
 
     def __exit__(self, *exc):
         import data.cache as cache
         import data.fetcher as fetcher
         import data.realtime as realtime
-        import analysis.correlation as corr
         cfg._STOCKS_FILE = self.saved_file
         cache.CACHE_DB_PATH = self.saved_db
         realtime.get_realtime_quotes = self.saved["quotes"]
         fetcher.fetch_daily_kline = self.saved["kline"]
-        corr.fetch_daily_kline = self.saved["corr_kline"]
         return False
 
     def sector_items(self):

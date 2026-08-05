@@ -22,13 +22,15 @@ import os
 from datetime import datetime
 
 from data.fetcher import is_hk_stock, is_index, is_sector
-# 24h mtime 缓存判定沿用板块列表那套惯例，不另造机制（#33）
-from data.sector_list import _is_cache_valid
+# 24h mtime 缓存判定沿用统一的那套惯例，不另造机制（#33；#41 起在 data/file_cache.py）
+from data.file_cache import is_fresh_hours
 from utils.logger import get_logger
 
 logger = get_logger("fundamentals")
 
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache", "fundamentals")
+# 财报按季度更新，24h 足够新；沿用与股票池/板块列表相同的 mtime 口径
+_CACHE_MAX_AGE_HOURS = 24
 
 QUARTER_INDICATOR = "按单季度"
 ANNUAL_INDICATOR = "按年度"
@@ -134,7 +136,7 @@ def get_fundamentals(symbol: str, stock_type: str | None = None,
         return None
 
     path = os.path.join(_CACHE_DIR, f"{symbol}.json")
-    if not force_refresh and _is_cache_valid(path):
+    if not force_refresh and is_fresh_hours(path, _CACHE_MAX_AGE_HOURS):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
