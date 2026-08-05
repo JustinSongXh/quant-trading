@@ -1,222 +1,95 @@
 # A股港股量化分析系统
 
-多策略融合的 A 股 + 港股量化分析系统，集成技术指标分析、缠论买卖点识别、盘后信号扫描和可视化回测。
+A 股 + 港股的本地量化分析：取数 → 确定性计算（技术指标 / 缠论 / Kronos 预测 / 新闻情绪 / 基本面 / 板块相关性 / 板块轮动 / 板块内选股）→ Streamlit 看板 + 回测 + 盘后扫描。
 
-## 架构概览
-
-```
-数据采集
-├── A股: AKShare / baostock
-├── 港股: 腾讯财经接口
-└── 本地缓存: DuckDB(K线) + JSON(股票列表)
-         │
-    ┌────┴──────────┐
-    ▼                ▼
-技术分析(6维度)     缠论分析(czsc)
-MACD/RSI/KDJ/       笔/线段/中枢
-MA交叉/MA排列/       三类买卖点
-布林带/成交量确认
-    │                │
-    └───────┬────────┘
-            ▼
-     信号融合 & 决策 ←── 情绪分析(预留)
-            │
-     ┌──────┼──────┐
-     ▼      ▼      ▼
-   回测   盘后扫描  可视化看板
-   引擎   命令行    Streamlit
-```
-
-## 功能
-
-- **A 股 + 港股**：支持沪深主板/创业板/科创板 + 港股，自动适配交易规则
-- **多策略信号融合**：技术指标（6 维度加权）+ 缠论买卖点 + 情绪分析（预留）
-- **历史回测**：自研引擎，A 股 T+1 / 港股 T+0，涨跌停，手续费
-- **全局信号总览**：一张表查看所有股票的当前推荐，点击跳转详情
-- **单股票详细分析**：K 线 + 布林带 + MACD + RSI/KDJ + 信号总览 + 净值曲线
-- **当前信号推荐**：MACD / RSI / KDJ / 布林带 / 缠论各策略维度判定
-- **股票池管理**：搜索全市场 5000+ 只 A 股和 30 只热门港股，一键增删
-- **盘后扫描**：命令行扫描股票池，打印当日有买卖信号的标的
-- **回测时间可选**：近 3 个月 / 6 个月 / 1 年 / 2 年
-
-## 技术栈
-
-| 组件 | 技术选型 |
-|------|---------|
-| A 股数据 | AKShare（优先）/ baostock（备选） |
-| 港股数据 | 腾讯财经接口 |
-| 本地缓存 | DuckDB（K线）+ JSON（股票列表，24h 过期） |
-| 技术指标 | 纯 pandas/numpy 自研（MA/MACD/RSI/KDJ/布林带/量比） |
-| 缠论分析 | czsc（笔/中枢/三类买卖点） |
-| 信号融合 | 多维度加权 + 连续确认 + 成交量验证 |
-| 回测引擎 | 自研（A 股 T+1 / 港股 T+0，涨跌停，手续费） |
-| 可视化 | Streamlit + Plotly |
-| 情绪分析 | Claude API Haiku（预留，待接入） |
-
-## 项目结构
-
-```
-quant-trading/
-├── config/
-│   ├── settings.py          # 全局配置（参数、权重、API key）
-│   └── stocks.json          # 股票池（A股+港股，可通过界面管理）
-├── data/
-│   ├── fetcher.py           # 数据采集（A股: AKShare/baostock, 港股: 腾讯）
-│   ├── stock_list.py        # 全市场股票列表获取与缓存
-│   ├── cache.py             # DuckDB 本地缓存
-│   ├── mock.py              # Mock 数据（离线测试用）
-│   └── news.py              # 新闻采集（预留）
-├── analysis/
-│   ├── technical.py         # 技术指标（6维度信号 + 成交量确认）
-│   ├── chanlun.py           # 缠论分析（笔/中枢/三类买卖点）
-│   └── sentiment.py         # 情绪分析（预留）
-├── strategy/
-│   ├── signals.py           # 信号生成（整合技术+缠论+情绪）
-│   └── fusion.py            # 多信号融合决策
-├── backtest/
-│   ├── engine.py            # 回测核心逻辑
-│   ├── broker.py            # 模拟券商（A股T+1/港股T+0，手续费）
-│   └── metrics.py           # 绩效指标（收益率、夏普、回撤等）
-├── utils/
-│   └── logger.py            # 日志
-├── main.py                  # 回测入口
-├── scanner.py               # 盘后信号扫描
-├── purge_news.py            # 定时清理窗口外新闻数据
-├── app.py                   # Streamlit 可视化看板（3 页面）
-├── requirements.txt
-├── .env.example
-└── .gitignore
-```
+**主体是零 token 的纯计算**：排序、加权、阈值判定全是写死的公式，改权重就是改 `config/settings.py`。模型只出现在两处可插拔面板里（自然语言生成策略、对话式分析助手），各自的 SDK 按需安装、不进基础镜像。
 
 ## 快速开始
 
-```bash
-# 克隆项目
-git clone https://github.com/JustinSongXh/quant-trading.git
-cd quant-trading
-
-# 创建虚拟环境并安装依赖
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 复制配置文件
-cp .env.example .env
-```
-
-## 使用方式
-
-### 1. 可视化看板（推荐）
+只通过 Docker 运行：
 
 ```bash
-streamlit run app.py --server.port 8501
+docker compose up -d                                    # 起容器，访问 http://localhost:8501
+curl -s -o /dev/null -w '%{http_code}\n' \
+  http://localhost:8501/_stcore/health                  # 健康检查，期望 200
+docker logs --tail 50 -f quant-app                      # 看日志
+docker exec quant-app python tests/test_integration.py  # 容器内跑脚本/测试
 ```
 
-三个页面：
-- **全局信号总览**：所有股票的当前推荐一览，点击「详情」跳转分析
-- **单股票分析**：选股 → 选时间范围 → 点「开始分析」，查看 K 线图、策略信号、回测绩效、交易明细
-- **股票池管理**：搜索全市场股票添加，或手动输入代码添加，一键移除
+代码目录以 volume 挂进容器，改完即时生效，不用重建镜像。
 
-### 2. 命令行回测
+> ⚠️ **别在宿主机直接跑 python**（宿主是 2.x 且没有项目依赖）。另外**镜像重建当前是坏的**（pypi 拉大 wheel 会被掐断），日常用 `docker exec quant-app pip install <pkg>` 绕开——症状、成因与解法见 [CLAUDE.md](CLAUDE.md) 第 2、4 节。
+
+## 页面
+
+侧边栏 7 页（实现在 `ui/pages/`，路由表在 `app.py`）：
+
+| 页面 | 一句话 |
+|---|---|
+| 全局信号总览 | 股票池所有标的的当前推荐一览，可按类型限定扫描范围 |
+| 单股票分析 | K 线 + 指标 + 信号 + 回测 + 情绪卡 + 基本面卡 |
+| 新闻列表 | 池内标的的新闻/公告/股吧，带情绪分 |
+| 股票池管理 | 搜索全市场增删个股/指数/板块，支持批量加板块 |
+| 板块分析 | 板块相关性、板块轮动、板块内选股三个视图 |
+| 自定义策略 | 挂载自定义交易策略，并可用自然语言生成新策略 |
+| AI 分析助手 | 把上面这些确定性函数包装成工具，用对话调用 |
+
+每页的入口、依赖的计算、以及**代价与边界**（哪些操作慢、覆盖面到哪）见 [docs/pages.md](docs/pages.md)。
+
+## 命令行入口
 
 ```bash
-python main.py
+docker exec quant-app python main.py         # 批量回测股票池
+docker exec quant-app python scanner.py      # 盘后扫描，打印当日有信号的标的
+docker exec quant-app python purge_news.py   # 手工清理窗口外新闻
 ```
 
-扫描 `config/stocks.json` 中的全部股票，输出每只的回测绩效。
+三个都**没有配 crontab**，目前是手动跑。app 进程内另有三个定时任务（每日 03:00 清新闻、03:20 刷板块成分股缓存、交易日 15:40 落板块资金流快照），见 `ui/jobs.py`。
 
-### 3. 盘后信号扫描
+## 数据来源
 
-```bash
-python scanner.py
-```
+| 数据 | 来源 |
+|---|---|
+| A 股日K | AKShare（优先）→ baostock（兜底） |
+| 港股行情 | 腾讯 |
+| 个股/指数实时快照 | 腾讯（可批量） |
+| 板块指数日K、板块快照、财报摘要、板块资金流 | 同花顺（经 AKShare） |
+| 板块成分股 | 东方财富（手写 HTTP，含限流降级） |
+| 新闻 / 股吧 / 公告 | 东方财富 / 东方财富 / 巨潮资讯 |
 
-扫描全部股票池，打印当日有买卖信号的股票。只输出到终端——通知渠道见 issue #4（原先的
-PushPlus 微信推送从未启用过，已删除）。
+各源的模块、缓存位置与 TTL、以及限流现状见 [docs/data-sources.md](docs/data-sources.md)。
 
-### 4. 定时执行（crontab）
+## 代码结构
 
-```bash
-# 每个交易日 15:30 自动扫描
-30 15 * * 1-5 cd /path/to/quant-trading && .venv/bin/python scanner.py >> /var/log/quant-scanner.log 2>&1
-```
+| 顶层包 | 职责 |
+|---|---|
+| `config/` | 参数常量（`settings.py`）与股票池读写（`pool.py`） |
+| `data/` | 取数与缓存，唯一实现「缓存新鲜度 / 回落 / 限流重试」的层 |
+| `analysis/` | 纯计算：技术、缠论、Kronos、情绪、基本面、相关性、轮动、板块选股、对话工具 |
+| `strategy/` | 信号聚合 → 决策 → 仓位管理，以及自然语言生成策略的流水线 |
+| `backtest/` | 回测引擎、模拟券商、绩效指标 |
+| `ui/` | Streamlit 界面：`ui/pages/` 一页一模块，`ui/shared.py` 与 `ui/cards.py` 为共用件 |
+| `utils/` | 日志、插件发现 |
+| `tests/` | 一个功能切片一个文件，全部 mock、不打网络 |
 
-> 新闻数据清理无需 crontab：app 进程内置 APScheduler，每日 03:00 自动删除超出窗口
-> （过去 N 个交易日）的新闻/公告/股吧。采集/打分只在用户访问时写入，删除由该定时任务统一做。
-> 需手动清理时可随时运行 `python purge_news.py`（容器内：`docker exec quant-app python purge_news.py`）。
+分层与依赖方向、模块清单、页面到模块的映射见 [docs/architecture.md](docs/architecture.md)。
 
-## 配置说明
+## 策略与规则
 
-### 股票池 (`config/stocks.json`)
+信号是**单源选择 + 阈值判定**（技术 / 缠论 / Kronos 三选一，`|信号| < 阈值` 视为观望），**不是多源加权融合**。技术信号自身由 7 个分量加权、再乘成交量确认系数；A 股按 T+1、港股按 T+0 回测。
 
-```json
-[
-    {"code": "600519", "name": "贵州茅台", "market": "A"},
-    {"code": "00700", "name": "腾讯控股", "market": "HK"}
-]
-```
+完整的分量权重、缠论买卖点强度、仓位分级、费率与涨跌停规则见 [docs/strategies.md](docs/strategies.md)——那份以代码为准，改代码就要改它（有测试守着两边一致）。
 
-可通过可视化看板的「股票池管理」页面增删，也可以直接编辑此文件。
+## 配置
 
-### 策略参数 (`config/settings.py`)
+| 在哪 | 是什么 |
+|---|---|
+| `config/stocks.json` | 自选股票池（个股/指数/板块）。**不入 git**，每台机器不同；界面「股票池管理」页可增删 |
+| `.env` | 凭证（`ANTHROPIC_API_KEY`），模板见 `.env.example` |
+| `config/settings.py` | 全部参数常量：指标周期、信号阈值、仓位分级、回测费率、各类权重 |
 
-```python
-# 技术指标参数
-TECHNICAL = {
-    "ma_periods": [5, 10, 20, 60],
-    "macd": {"fast": 12, "slow": 26, "signal": 9},
-    "rsi_period": 14,
-    "kdj_period": 9,
-    "boll_period": 20,
-}
+## 开发
 
-# 信号融合权重
-SIGNAL_WEIGHTS = {
-    "technical": 0.35,
-    "chanlun": 0.35,
-    "sentiment": 0.30,  # 待接入
-}
-```
+开发约定（容器内跑测试、依赖怎么装、issue 先定稿再实现、提交规范、哪些文件不入 git）见 [CLAUDE.md](CLAUDE.md)。
 
-## 策略说明
-
-### 技术信号（6 维度加权）
-
-| 维度 | 权重 | 买入信号 | 卖出信号 |
-|------|------|---------|---------|
-| MACD | 25% | DIF 上穿 DEA（金叉） | DIF 下穿 DEA（死叉） |
-| RSI | 10% | RSI 从超卖区回升（上穿30） | RSI 从超买区回落（下穿70） |
-| KDJ | 15% | K 上穿 D，J<20 加强 | K 下穿 D，J>80 加强 |
-| MA交叉 | 15% | MA5 上穿 MA20 | MA5 下穿 MA20 |
-| MA排列 | 15% | 多头排列（短>中>长） | 空头排列（短<中<长） |
-| 布林带 | 20% | 价格触及下轨反弹 | 价格触及上轨回落 |
-
-最终信号乘以**成交量确认**系数（放量增强、缩量削弱）。
-
-### 缠论信号
-
-基于 czsc 库自动识别分型、笔、中枢，生成三类买卖点：
-
-| 买卖点 | 信号强度 | 含义 |
-|--------|---------|------|
-| B1 / S1 | 1.0 | 趋势背驰（反转信号） |
-| B2 / S2 | 0.7 | 回调不破前低/高（趋势确认） |
-| B3 / S3 | 0.8 | 中枢突破回踩（趋势加速） |
-
-### 融合决策
-
-```
-综合分数 = 技术信号 × 0.5 + 缠论信号 × 0.5（情绪未接入时）
-```
-
-- 缠论 B1/S1 强信号可直接触发交易
-- 其余信号需连续 2 天同向确认才触发
-
-### A 股 vs 港股交易规则
-
-| | A 股 | 港股 |
-|---|------|------|
-| T+N | T+1 | T+0 |
-| 涨跌停 | 主板 ±10%，创业板/科创板 ±20% | 无限制 |
-| 佣金 | 万 2.5 | 万 5 |
-| 印花税 | 千 1（卖出单边） | 千 1.3（双边） |
+每个功能的完整设计、实测数据与踩坑记录在 [GitHub issue](https://github.com/JustinSongXh/quant-trading/issues) 里——**issue 从不关闭**，等于这个项目的日志。
