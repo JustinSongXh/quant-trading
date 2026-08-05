@@ -37,7 +37,7 @@ PATH_ARGS = ("file_path", "path", "notebook_path")
 
 # 仓库内也不给读的：都是不进 git 的本机/个人配置
 DENIED_IN_REPO = (
-    ".env",              # PUSHPLUS_TOKEN / ANTHROPIC_API_KEY
+    ".env",              # ANTHROPIC_API_KEY 等凭证
     "config/stocks.json",  # 个人自选股
     ".claude",           # 本机 Claude Code 配置与权限规则
 )

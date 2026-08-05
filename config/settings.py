@@ -102,9 +102,6 @@ SECTOR_PICK_WEIGHTS = {
     "fundamental": 1.0,
 }
 
-# ========== 通知配置 ==========
-PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
-
 # ========== API 配置 ==========
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 

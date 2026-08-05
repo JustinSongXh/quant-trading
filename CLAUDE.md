@@ -4,11 +4,11 @@
 
 ## 1. 项目是什么
 
-A 股 + 港股量化分析系统：本地取数 → 确定性计算（技术指标 / 缠论 / Kronos 预测 / 新闻情绪 / 基本面 / 板块相关性 / 板块轮动 / 板块内选股）→ Streamlit 页面 + 回测 + 盘后扫描推送。
+A 股 + 港股量化分析系统：本地取数 → 确定性计算（技术指标 / 缠论 / Kronos 预测 / 新闻情绪 / 基本面 / 板块相关性 / 板块轮动 / 板块内选股）→ Streamlit 页面 + 回测 + 盘后扫描。
 
 - **唯一在用的前端是 Streamlit**，7 页：全局信号总览 / 单股票分析 / 新闻列表 / 股票池管理 / 板块分析 / 自定义策略 / AI 分析助手。入口是 `app.py`（只有配置 + CSS + 路由表，70 行），页面实现在 `ui/pages/*.py`，跨页共用的展示助手在 `ui/shared.py`、情绪/基本面卡片在 `ui/cards.py`（#42 拆的，拆前 `app.py` 是 2724 行）。
 - 曾经有一个 FastAPI 后端 `api/server.py`（给微信小程序用），小程序不做了，代码已在 #40 删除。**不要再引入第二套前端/接口层**，也不要拿它的历史实现当对照。
-- 命令行入口：`main.py`（批量回测）、`scanner.py`（盘后扫描 + PushPlus 推送）、`purge_news.py`（清理窗口外新闻）。
+- 命令行入口：`main.py`（批量回测）、`scanner.py`（盘后扫描，结果只打终端——#4 删掉了从未启用的微信推送）、`purge_news.py`（清理窗口外新闻，日常由进程内 job 顶着）。**这三个当前都没有 crontab 在调**，是手动跑的。
 - app 进程内还有三个 APScheduler 定时任务（03:00 清新闻、03:20 刷板块成分股缓存、15:40 板块资金流快照），见 `ui/jobs.py::start_background_jobs`。
 
 ## 2. 运行环境：只在 Docker 里跑
@@ -106,7 +106,7 @@ docker exec quant-app pip install <pkg>     # 装在容器 fs 内，重启保留
 |---|---|
 | `docker-compose.yml` | 含本机资源限制（`mem_limit`、日志上限），每台机器不一样；已 `git rm --cached` |
 | `config/stocks.json` | 个人自选股票池/板块池，不是仓库通用配置 |
-| `.env` | 密钥（`PUSHPLUS_TOKEN`、`ANTHROPIC_API_KEY`），模板见 `.env.example` |
+| `.env` | 凭证（`ANTHROPIC_API_KEY`），模板见 `.env.example` |
 | `data/cache/` | DuckDB + 各类 JSON 快照，全是本地产物 |
 | `data/hf_cache/` | HuggingFace 权重缓存（Kronos） |
 | `tests/kronos_repo/` | 第三方仓库 clone，自带 `.git`，误 add 会变成嵌套仓库 |
