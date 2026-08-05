@@ -1,4 +1,11 @@
-"""盘后信号扫描：每日收盘后运行，扫描股票池，发现买卖信号推送微信"""
+"""盘后信号扫描：收盘后运行，扫描股票池，把当日有买卖信号的标的打到终端。
+
+**没有推送**：原先这里会把结果拼成 HTML 发 PushPlus 微信，但那条链路一次都没生效过
+（`.env` 从未配 token，也没有 crontab 在调本脚本），#4 起删掉——要做通知就连调度一起做，
+留一个空转的出口只会让人以为收盘后有推送在跑。
+
+    docker exec quant-app python scanner.py
+"""
 
 from datetime import datetime
 from config.pool import load_stock_pool
@@ -7,7 +14,6 @@ from data.fetcher import fetch_daily_kline
 from data.cache import save_kline, load_kline
 from strategy.signals import build_signals
 from strategy.decision import decide, SOURCE_COLUMNS
-from notify.wechat import send_wechat
 from utils.logger import get_logger
 
 logger = get_logger("scanner")
@@ -87,73 +93,22 @@ def scan_all() -> list[dict]:
     return alerts
 
 
-def format_report(alerts: list[dict]) -> str:
-    """将信号列表格式化为 HTML 报告"""
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    if not alerts:
-        return f"""
-        <h3>📊 {today} 盘后扫描报告</h3>
-        <p>今日股票池无买卖信号。</p>
-        """
-
-    rows = ""
-    for a in alerts:
-        color = "#e74c3c" if a["action"] == "买入" else "#27ae60"
-        rows += f"""
-        <tr>
-            <td>{a['name']}({a['code']})</td>
-            <td style="color:{color};font-weight:bold">{a['action']}</td>
-            <td>{a['close']:.2f}</td>
-            <td>{a['source']}</td>
-            <td>{a['signal']}</td>
-            <td>{a['position']}</td>
-        </tr>
-        """
-
-    return f"""
-    <h3>📊 {today} 盘后扫描报告</h3>
-    <p>共发现 <b>{len(alerts)}</b> 个信号：</p>
-    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
-        <tr style="background:#f0f0f0">
-            <th>股票</th><th>操作</th><th>收盘价</th><th>信号源</th><th>信号值</th><th>仓位</th>
-        </tr>
-        {rows}
-    </table>
-    <br>
-    <p style="color:#999;font-size:12px">
-        信号值范围: -1(强卖)~+1(强买) | 缠论: B1=1.0 B2=0.7 B3=0.8 S1=-1.0 S2=-0.7 S3=-0.8
-    </p>
-    """
-
-
 def run():
-    """执行扫描并推送"""
+    """执行扫描并把结果打到终端，返回 alerts（供别的脚本复用）"""
     logger.info("=" * 50)
     logger.info("盘后信号扫描开始")
     logger.info("=" * 50)
 
     alerts = scan_all()
-
-    # 生成报告
-    report = format_report(alerts)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    if alerts:
-        title = f"🔔 {today} 发现 {len(alerts)} 个交易信号"
-    else:
-        title = f"📊 {today} 盘后扫描：无信号"
-
-    # 推送微信
-    send_wechat(title, report)
-
-    # 同时打印到终端
+    print(f"\n📊 {today} 盘后扫描：共 {len(alerts)} 个信号")
     for a in alerts:
         print(f"  {a['action']} | {a['name']}({a['code']}) | 收盘:{a['close']:.2f} "
               f"| {a['source']}信号:{a['signal']} | {a['position']}")
-
     if not alerts:
         print("  今日无信号")
+    print("  信号值范围 -1(强卖)~+1(强买)；缠论 B1=1.0 B2=0.7 B3=0.8 S1=-1.0 S2=-0.7 S3=-0.8")
 
     logger.info(f"扫描完成，共 {len(alerts)} 个信号")
     return alerts

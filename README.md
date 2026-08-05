@@ -24,7 +24,7 @@ MA交叉/MA排列/       三类买卖点
      ┌──────┼──────┐
      ▼      ▼      ▼
    回测   盘后扫描  可视化看板
-   引擎   微信推送  Streamlit
+   引擎   命令行    Streamlit
 ```
 
 ## 功能
@@ -36,7 +36,7 @@ MA交叉/MA排列/       三类买卖点
 - **单股票详细分析**：K 线 + 布林带 + MACD + RSI/KDJ + 信号总览 + 净值曲线
 - **当前信号推荐**：MACD / RSI / KDJ / 布林带 / 缠论各策略维度判定
 - **股票池管理**：搜索全市场 5000+ 只 A 股和 30 只热门港股，一键增删
-- **盘后扫描**：自动扫描股票池，发现信号可推送微信
+- **盘后扫描**：命令行扫描股票池，打印当日有买卖信号的标的
 - **回测时间可选**：近 3 个月 / 6 个月 / 1 年 / 2 年
 
 ## 技术栈
@@ -51,7 +51,6 @@ MA交叉/MA排列/       三类买卖点
 | 信号融合 | 多维度加权 + 连续确认 + 成交量验证 |
 | 回测引擎 | 自研（A 股 T+1 / 港股 T+0，涨跌停，手续费） |
 | 可视化 | Streamlit + Plotly |
-| 微信推送 | PushPlus |
 | 情绪分析 | Claude API Haiku（预留，待接入） |
 
 ## 项目结构
@@ -78,8 +77,6 @@ quant-trading/
 │   ├── engine.py            # 回测核心逻辑
 │   ├── broker.py            # 模拟券商（A股T+1/港股T+0，手续费）
 │   └── metrics.py           # 绩效指标（收益率、夏普、回撤等）
-├── notify/
-│   └── wechat.py            # 微信推送（PushPlus）
 ├── utils/
 │   └── logger.py            # 日志
 ├── main.py                  # 回测入口
@@ -134,7 +131,8 @@ python main.py
 python scanner.py
 ```
 
-扫描全部股票池，打印当日有买卖信号的股票。配置 PushPlus token 后可推送微信。
+扫描全部股票池，打印当日有买卖信号的股票。只输出到终端——通知渠道见 issue #4（原先的
+PushPlus 微信推送从未启用过，已删除）。
 
 ### 4. 定时执行（crontab）
 
@@ -179,14 +177,6 @@ SIGNAL_WEIGHTS = {
     "sentiment": 0.30,  # 待接入
 }
 ```
-
-### 微信推送 (`.env`)
-
-```
-PUSHPLUS_TOKEN=你的token
-```
-
-在 [pushplus.plus](https://www.pushplus.plus/) 微信扫码获取 token。
 
 ## 策略说明
 
